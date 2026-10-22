@@ -1,0 +1,2627 @@
+---
+title: "Progetto FS - Spagna"
+author: "Claudio R. Salerno"
+date: "2024-07-02"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# INTRODUZIONE
+
+Il progetto si concentra sulla analisi della mortalità in Spagna. In particolare, sono state esaminate le tendenze temporali della mortalità, conducendo una duplice analisi con distinzione per genere. Lo studio della mortalità è un importante indicatore della salute di una popolazione che può fornire informazioni utili per la gestione dei rischi finanziari e per la pianificazione di politiche pubbliche. Il focus è mirato ad individuare le probabilità di morte di una popolazione o un gruppo di persone al fine di aiutare gli assicuratori nella determinazione del prezzo di un prodotto assicurativo o in ottica di prestazioni pensionistiche. La scelta della Spagna non è casuale ma influenzata da diversi fattori, primo fra tutti l'aspettativa di vita più alta in europa (84 anni). Inoltre, la Spagna ha attraversato una significativa transizione demografica ed epidemiologica, rendendola un caso interessante per studiare l'impatto delle politiche sanitarie e delle condizioni socio-economiche sulla salute della popolazione. La modernizzazione del sistema sanitario spagnolo, con importanti riforme e miglioramenti nella copertura e qualità delle cure, fornisce un contesto ricco per valutare come questi cambiamenti abbiano influenzato la mortalità e l'aspettativa di vita. La Spagna è un esempio emblematico di come una società possa affrontare e superare crisi significative, come la Guerra Civile e le epidemie di influenza, anche se non considerate in questo studio. La diversità regionale, inoltre, con differenze nelle condizioni socio-economiche, culturali e ambientali tra le varie comunità autonome, permette un'analisi comparativa che può rivelare fattori chiave per la salute e la longevità.
+
+## pacchetti utilizzati
+
+```{r package, include=FALSE}
+library(demography) 
+library(StMoMo) 
+library(fanplot)
+library(ggplot2)
+library(dplyr)
+library(lifecontingencies) 
+library(MortalityLaws) 
+library(MortalityTables) 
+library(LifeInsuranceContracts)
+library(gridExtra)
+library(knitr)
+```
+
+## impostazione dati demgrafici
+
+```{r DATI SPAGNA, include=FALSE}
+SPAdata <- read.demogdata(file = "Mx_1x1_spagna.txt",
+                          popfile = "Exposures_1x1_spagna.txt",
+                          type = "mortality",
+                          label = "Spain")
+names(SPAdata)
+```
+
+# DATA SETTING
+
+```{r DATA SET SPAGNA}
+a.min <- 0 # età minima dell'intervallo di fit
+a.max <- 100 # età massima dell'intervallo di fit
+omega <-110 # età estrema delle tavole
+A.fit <-c(a.min:a.max) 
+y.fit.min <- 1950 # anno minimo dell'intervallo di fit
+y.fit.max <- 2019 # anno massimo dell'intervallo di fit
+Y.fit <- c(y.fit.min:y.fit.max)
+y.pred <- 67 # orizzonte d proiezione
+Y.pred <- c((y.fit.max+1):(y.fit.max+y.pred))
+n.sim <- 1000 # numero di simulazioni
+n.boot <- 20 # numero di simulazioni per il bootstrap
+int_vect <- c(rep(0.02,omega-a.min)) # vettore di tassi d'interesse per scadenza
+v_vect <- cumprod((1+int_vect)^-1) # vettore di fattori di sconto per scadenza
+```
+
+## Trasformazione dei dati e definzione dell'intervallo di stima
+
+```{r TRASFORMAZIONE DATI SPAGNA}
+SPAmStMoMoC <- StMoMoData(SPAdata, series = "male")     # esposizioni centrali
+SPAfStMoMoC <- StMoMoData(SPAdata, series = "female")   
+SPAmStMoMoI <- central2initial(SPAmStMoMoC)             # esposizioni iniziali
+SPAfStMoMoI <- central2initial(SPAfStMoMoC)
+wxt <- genWeightMat(ages = A.fit, years = Y.fit, clip = 4) # pesi
+SPAmRates <- SPAmStMoMoC$Dxt/SPAmStMoMoC$Ext
+SPAmRates <- SPAmRates[A.fit+1,tail(SPAmStMoMoC$years+1,
+                                    length(Y.fit))-SPAmStMoMoC$years[1]]
+SPAfRates <- SPAfStMoMoC$Dxt/SPAfStMoMoC$Ext
+SPAfRates <- SPAfRates[A.fit+1,tail(SPAfStMoMoC$years+1,
+                                    length(Y.fit))-SPAfStMoMoC$years[1]]
+```
+
+## Importo fuzioni per il modello di APC
+
+```{r FUNZIONI}
+source("Functions.r")
+```
+
+\newpage
+
+# MODELLO LEE CARTER
+
+Lee e Carter, idearono questo modello nel 1992, ed ipotizzarono che seguisse un andamento log-bilineare, pertanto la sua formula può essere descritta come segue:
+
+$$ \ln(m_{x,t}) = a_x + b_x k_t + \epsilon_{x,t} $$
+
+dove:
+
+-   $\ln(m_{x,t})$ è il logaritmo naturale del tasso di mortalità per l'età $x$ e l'anno $t$.
+-   $a_x$ rappresenta il livello medio del logaritmo del tasso di mortalità per l'età $x$.
+-   $b_x$ misura la sensibilità del logaritmo del tasso di mortalità per l'età $x$ ai cambiamenti nel tempo.
+-   $k_t$ è l'indice del tempo che cattura la variazione complessiva nel logaritmo del tasso di mortalità per l'anno $t$.
+-   $\epsilon_{x,t}$ è un termine di errore che rappresenta le deviazioni residue.
+
+$a_x$ rappresenta il livello medio del logaritmo del tasso di mortalità per ciascuna età $x$ nel periodo di osservazione. Viene calcolato come la media dei logaritmi dei tassi di mortalità osservati per ogni età:
+
+$$ a_x = \frac{1}{T} \sum_{t=1}^T \ln(m_{x,t}) $$
+
+Indica il livello di base della mortalità per ogni età indipendentemente dalle variazioni temporali.
+
+$b_x$ misura quanto il logaritmo del tasso di mortalità per una determinata età $x$ risponde ai cambiamenti generali nel tempo. Viene ottenuto tramite l'analisi delle componenti principali dei residui dopo aver sottratto $a_x$ dai logaritmi dei tassi di mortalità osservati. Un valore alto di $b_x$ significa che il tasso di mortalità per quella età è molto sensibile ai cambiamenti temporali.
+
+$k_t$ cattura le variazioni nel logaritmo del tasso di mortalità nel tempo per tutte le età. È un indicatore delle tendenze generali della mortalità nel tempo, come il miglioramento della salute pubblica o altre influenze temporali. Viene stimato come parte della decomposizione dei residui utilizzando l'analisi delle componenti principali.
+
+$\epsilon_{x,t}$ sono i termini di errore che rappresentano le deviazioni residue che non sono spiegate dai parametri $a_x$, $b_x$, e $k_t$. Rappresentano variazioni casuali o specifiche dell'età e del tempo che non sono catturate dai principali parametri del modello.
+
+Per prima cosa, si calcola $a_x$ come la media dei logaritmi dei tassi di mortalità osservati per ciascuna età $x$. Poi si sottrae $a_x$ dai logaritmi dei tassi di mortalità osservati per ottenere i residui:
+
+$$ d_{x,t} = \ln(m_{x,t}) - a_x $$
+
+Proiezione nel Futuro
+
+Per fare proiezioni future, si modella $k_t$ come una serie temporale (ad esempio, usando un modello autoregressivo ARIMA):
+
+$$ k_t = \alpha + \beta t + \gamma_t $$
+
+dove $\alpha$, $\beta$, e $\gamma_t$ sono parametri del modello autoregressivo.
+
+Utilizzo della Formula per Proiezioni
+
+Utilizzando i valori stimati di $a_x$, $b_x$, e le proiezioni future di $k_t$, possiamo calcolare i tassi di mortalità previsti:
+
+$$ \ln(m_{x,t}) = a_x + b_x k_t $$
+
+Ritrasformando il logaritmo, otteniamo i tassi di mortalità previsti:
+
+$$ m_{x,t} = e^{a_x + b_x k_t} $$
+
+### Fit del modello
+
+```{r FIT LC, include=FALSE}
+LCfit_SPAm <- fit(lc(link = "logit"), 
+                  data = SPAmStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt)
+LCfit_SPAf <- fit(lc(link = "logit"),
+                  data = SPAfStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt)
+```
+
+### stime dei parametri
+
+```{r parametri LC}
+# Impostazione della griglia 2x3 per i grafici
+par(mfrow = c(1, 3))
+
+# Plot per alpha[x]
+plot(LCfit_SPAm$ax, type = "l", col = "blue", ylab = expression(alpha[x]), xlab = "Età", main = expression(alpha[x]))
+lines(LCfit_SPAf$ax, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+
+# Plot per Beta[x]
+plot(LCfit_SPAm$bx, type = "l", col = "blue", ylab = expression(Beta[x]), xlab = "Età", main = expression(Beta[x]))
+lines(LCfit_SPAf$bx, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per k[t]
+plot(LCfit_SPAm$years, LCfit_SPAm$kt[1, ], type = "l", col = "blue", ylab = expression(k[t]), xlab = "Anno", main = expression(k[t]))
+lines(LCfit_SPAf$years, LCfit_SPAf$kt[1, ], col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+```
+
+$\alpha_x$: Questa componente cattura il livello medio della mortalità a ciascuna età. I grafici mostrano che per entrambe le popolazioni (maschi e femmine), il tasso di mortalità è più alto nelle età più avanzate. La mortalità infantile è più alta, diminuisce durante l'adolescenza e poi aumenta con l'età. I maschi hanno livelli di mortalità leggermente superiori rispetto alle femmine a quasi tutte le età, come si può vedere dalla curva blu (maschi) che è generalmente al di sopra della curva rossa (femmine).
+
+$B_x$: Questa componente rappresenta il pattern della mortalità per età. I grafici mostrano che c'è un picco all'inizio della vita (mortalità infantile) che diminuisce rapidamente. Dopo il picco iniziale, la mortalità tende a stabilizzarsi e diminuire leggermente fino ad un certo punto per poi aumentare nuovamente nell'età avanzata. Anche qui, ci sono differenze visibili tra maschi e femmine, ma queste differenze sono più pronunciate nelle età giovanili e adulte.
+
+$k_t$: Questo componente cattura il trend temporale della mortalità. I grafici mostrano che c'è una chiara tendenza al miglioramento della mortalità nel tempo (diminuzione di $k_t$). Questo indica che i tassi di mortalità sono diminuiti nel tempo sia per i maschi che per le femmine. La diminuzione sembra essere più accentuata per le femmine rispetto ai maschi, come indicato dalla curva rossa che tende ad essere leggermente al di sotto della curva blu.
+
+Il modello di Lee-Carter è utile per analizzare le tendenze della mortalità nel tempo e per fare proiezioni future. Dai grafici possiamo osservare che i maschi hanno tassi di mortalità generalmente più alti rispetto alle femmine in tutte le età. Questo è coerente con molti studi demografici che mostrano una maggiore longevità nelle donne. Entrambe le popolazioni mostrano un miglioramento dei tassi di mortalità nel tempo, il che potrebbe essere attribuito a vari fattori come miglioramenti nella sanità, stili di vita più sani e progressi nella medicina. La distribuzione della mortalità per età mostra i tipici pattern di mortalità con un picco nella mortalità infantile, una fase di basso rischio durante l'età adulta e un aumento della mortalità nelle età avanzate. Questi risultati possono essere utilizzati per ulteriori analisi, come la previsione della mortalità futura o l'analisi delle politiche sanitarie mirate a ridurre le disuguaglianze di genere nei tassi di mortalità.
+
+\newpage
+
+# MODELLO RH
+
+Il modello di Renshaw e Haberman è un'estensione del modello di Lee-Carter, molto utilizzato per la modellazione della mortalità e le proiezioni demografiche. Questo modello introduce la componente di coorte al modello di Lee-Carter, che originariamente considerava solo gli effetti di età e periodo.
+
+Modello di Renshaw e Haberman
+
+Il modello di Renshaw e Haberman può essere descritto matematicamente come segue:
+
+$$ \log m_{x,t} = \alpha_x + \beta_x \kappa_t + \gamma_x \delta_{t-x} + \epsilon_{x,t} $$
+
+Dove: 
+- $m_{x,t}$ è il tasso di mortalità per l'età $x$ nel tempo $t$. 
+- $\alpha_x$ è il parametro che rappresenta il livello medio di mortalità per l'età $x$. 
+- $\beta_x$ è il parametro che rappresenta l'effetto dell'età sui cambiamenti nel tempo. 
+- $\kappa_t$ è il parametro che rappresenta l'effetto temporale condiviso (simile al modello di Lee-Carter). 
+- $\gamma_x$ è il parametro che rappresenta l'effetto di coorte. 
+- $\delta_{t-x}$ è il parametro che rappresenta l'effetto specifico della coorte, dove $t-x$ è la coorte di nascita. 
+- $\epsilon_{x,t}$ è il termine di errore.
+
+Componenti del Modello di Renshaw e Haberman
+
+1.  **Effetto Età (**$\alpha_x$): Questo parametro rappresenta il livello di mortalità associato a ciascuna età $x$.
+
+2.  **Effetto Periodo (**$\beta_x \kappa_t$): Questo componente rappresenta come i tassi di mortalità cambiano nel tempo per ciascuna età $x$. $\beta_x$ è l'effetto dell'età sui cambiamenti temporali, mentre $\kappa_t$ rappresenta il fattore temporale comune.
+
+3.  **Effetto Coorte (**$\gamma_x \delta_{t-x}$): Questo componente aggiunge la dimensione di coorte al modello, rappresentando l'effetto specifico della coorte sui tassi di mortalità. $\gamma_x$ è l'effetto dell'età sugli effetti di coorte, mentre $\delta_{t-x}$ rappresenta l'effetto specifico della coorte $t-x$.
+
+Applicazione del Modello di Renshaw e Haberman
+
+L'applicazione di questo modello ai dati di mortalità segue alcuni passaggi simili al modello APC e al modello di Lee-Carter, ma con l'aggiunta della componente di coorte:
+
+1.  **Preparazione dei dati**: Organizzare i dati sui tassi di mortalità in una matrice con età, periodo e coorte.
+
+2.  **Stima dei parametri**: Utilizzare tecniche di regressione, come la decomposizione ai minimi quadrati o metodi di ottimizzazione numerica, per stimare i parametri $\alpha_x$, $\beta_x$, $\kappa_t$, $\gamma_x$ e $\delta_{t-x}$.
+
+3.  **Verifica del modello**: Valutare la bontà di adattamento del modello ai dati osservati e verificare la significatività dei parametri stimati.
+
+4.  **Proiezione**: Utilizzare il modello stimato per proiettare i tassi di mortalità futuri, tenendo conto degli effetti di età, periodo e coorte.
+
+Vantaggi del Modello di Renshaw e Haberman
+
+-   **Incorporazione della componente di coorte**: Fornisce una visione più dettagliata e accurata delle tendenze di mortalità includendo l'effetto delle coorti di nascita.
+-   **Flessibilità**: Permette di modellare variazioni nei tassi di mortalità che non sono catturate solo dagli effetti di età e periodo.
+
+Limiti del Modello di Renshaw e Haberman
+
+-   **Complessità**: L'aggiunta della componente di coorte aumenta la complessità del modello e la difficoltà di stima dei parametri.
+-   **Identificabilità**: Analogamente al modello APC, può presentare problemi di identificabilità e richiede vincoli appropriati per ottenere stime univoche.
+
+In sintesi, il modello di Renshaw e Haberman estende il modello di Lee-Carter incorporando gli effetti di coorte, fornendo una rappresentazione più completa delle dinamiche di mortalità. Tuttavia, richiede un'attenta gestione della complessità e dell'identificabilità dei parametri.
+
+### Fit del modello
+
+```{r FIT RH, include=FALSE}
+RHfit_SPAm <- fit(rh(link = "logit", cohortAgeFun="1"), 
+                  data = SPAmStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt,
+                  start.ax = LCfit_SPAm$ax,
+                  start.bx = LCfit_SPAm$bx,
+                  start.kt = LCfit_SPAm$kt)  
+RHfit_SPAf <- fit(rh(link = "logit", cohortAgeFun="1"),
+                  data = SPAfStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt,
+                  start.ax = LCfit_SPAf$ax,
+                  start.bx = LCfit_SPAf$bx,
+                  start.kt = LCfit_SPAf$kt)
+```
+
+### stime dei parametri
+
+```{r PAR RH}
+# Impostazione della griglia 2x3 per i grafici
+par(mfrow = c(2, 3))
+
+# Plot per alpha[x]
+plot(RHfit_SPAm$ax, type = "l", col = "blue", ylab = expression(alpha[x]), xlab = "Età", main = expression(alpha[x]))
+lines(RHfit_SPAf$ax, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per Beta0[x]
+plot(RHfit_SPAm$b0x, type = "l", col = "blue", ylab = expression(Beta[0][x]), xlab = "Età", main = expression(Beta[0][x]))
+lines(RHfit_SPAf$b0x, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per Beta[x]
+plot(RHfit_SPAm$bx, type = "l", col = "blue", ylab = expression(Beta[x]), xlab = "Età", main = expression(Beta[x]))
+lines(RHfit_SPAf$bx, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per k[t]
+plot(RHfit_SPAm$years, RHfit_SPAm$kt[1, ], type = "l", col = "blue", ylab = expression(k[t]), xlab = "Anno", main = expression(k[t]))
+lines(RHfit_SPAf$years, RHfit_SPAf$kt[1, ], col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per gamma[t]
+plot(RHfit_SPAm$years, RHfit_SPAm$gt, type = "l", col = "blue", ylab = expression(gamma[t]), xlab = "Anno", main = expression(gamma[t]))
+lines(RHfit_SPAf$years, RHfit_SPAf$gt, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+```
+
+Rappresentando i parametri del modello RH, si evince come in realtà ci sia un comportamento anomalo degli stessi, questo probabilmente causato dal fatto che il modello non sia sufficientemente robusto, pertanto non dovrebbe essere preso in considerazione nella scelta del modello migliore per il nostro studio, essendo che non è in grado di cogliere correttamente i diversi fattori che incidono sulla mortalità. Andremo in ogni caso a verificare la bontà di adattamento attraverso residui, BIC e L-L per avere conferma di ciò.
+
+\newpage
+
+# MODELLO APC
+
+$$ \ln(m_{x,t}) = \alpha_x + \kappa_t^{(1)} + \gamma_{t-x} $$
+
+Il modello APC (Age-Period-Cohort) è una tecnica statistica utilizzata per analizzare e interpretare le variazioni nei tassi di mortalità (o altre variabili di interesse) in relazione all'età, al periodo di osservazione e alla coorte di nascita. Questo modello è particolarmente utile in epidemiologia e demografia per comprendere come diversi fattori temporali influenzano i tassi di mortalità.
+
+Componenti del Modello APC
+
+1.  **Age (Età)**: Rappresenta l'effetto dell'età sugli individui. Il rischio di morte o di altri eventi può variare significativamente con l'età.
+
+2.  **Period (Periodo)**: Rappresenta l'effetto del periodo temporale in cui le osservazioni sono state effettuate. Cambiamenti nei tassi di mortalità possono essere influenzati da fattori temporali come miglioramenti nelle cure mediche, cambiamenti nello stile di vita, epidemie, ecc.
+
+3.  **Cohort (Coorte)**: Rappresenta l'effetto della coorte di nascita, cioè il gruppo di individui nati nello stesso periodo. Le persone nate in periodi diversi possono avere esperienze di vita diverse che influenzano il loro rischio di mortalità.
+
+Componenti del Modello APC
+
+-   **Effetto Età (**$\alpha_x$): Questo parametro cattura l'effetto che l'età ha sui tassi di mortalità. Generalmente, il rischio di mortalità aumenta con l'età.
+-   **Effetto Periodo (**$\kappa_t^{(1)}$): Questo parametro misura le variazioni nei tassi di mortalità dovute a cambiamenti nel periodo temporale. Ad esempio, un miglioramento nella sanità pubblica in un determinato periodo può ridurre i tassi di mortalità.
+-   **Effetto Coorte (**$\gamma_{t-x}$): Questo parametro cattura le variazioni nei tassi di mortalità che dipendono dalla coorte di nascita. Fattori come le condizioni di vita durante l'infanzia e le prime esperienze di vita possono influenzare il rischio di mortalità. Identificabilità del Modello APC
+
+Un problema chiave con il modello APC è l'identificabilità, dovuto alla perfetta collinearità tra età, periodo e coorte (Periodo = Età + Coorte). Questo significa che non è possibile stimare simultaneamente gli effetti di età, periodo e coorte senza fare ulteriori assunzioni o vincoli. Diverse tecniche sono state sviluppate per affrontare questo problema, inclusi i modelli di identificazione intrinseca e l'utilizzo di restrizioni parametriche.
+
+Applicazione del Modello APC
+
+Per applicare il modello APC ai dati di mortalità, generalmente si utilizza un approccio di regressione log-lineare.
+
+### Fit del modello
+
+```{r FIT APC, include=FALSE}
+APCfit_SPAm <- fit(apc(link = "logit"),
+                   data = SPAmStMoMoI,
+                   ages.fit = a.min:a.max,
+                   years.fit=y.fit.min:y.fit.max,
+                   wxt = wxt)
+APCfit_SPAf <- fit(apc(link = "logit"),
+                   data = SPAfStMoMoI,
+                   ages.fit = a.min:a.max,
+                   years.fit=y.fit.min:y.fit.max,
+                   wxt = wxt)
+```
+
+### stime dei parametri
+
+```{r PAR APC}
+# Impostazione della griglia 2x3 per i grafici
+par(mfrow = c(1, 3))
+
+# Plot per alpha[x]
+plot(APCfit_SPAm$ax, type = "l", col = "blue", ylab = expression(alpha[x]), xlab = "Età", main = expression(alpha[x]))
+lines(APCfit_SPAf$ax, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per kappa[t]
+plot(APCfit_SPAm$years, APCfit_SPAm$kt, type = "l", col = "blue", ylab = expression(kappa[t]), xlab = "Anno", main = expression(kappa[t]))
+lines(APCfit_SPAf$years, APCfit_SPAf$kt, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+
+# Plot per gamma[t]
+plot(APCfit_SPAm$cohorts, APCfit_SPAm$gc, type = "l", col = "blue", ylab = expression(gamma[t]), xlab = "Anno di nascita", main = expression(gamma[t]))
+lines(APCfit_SPAf$cohorts, APCfit_SPAf$gc, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), lty = 1, bty = "n")
+```
+
+Nel primo grafico, $\alpha_x$ rappresenta l'effetto dell'età sulla mortalità. Si osserva che entrambi i sessi presentano una forma simile: alta mortalità infantile, un minimo durante l'età adulta giovane, e un aumento della mortalità con l'avanzare dell'età. Tuttavia, la curva dei maschi è generalmente leggermente sopra quella delle femmine, indicando una mortalità leggermente più alta per i maschi in tutte le fasce d'età.
+
+Il secondo grafico mostra $\kappa_t$, l'effetto del periodo sulla mortalità. Entrambi i sessi mostrano un declino continuo della mortalità nel tempo, indicando miglioramenti generali nelle condizioni di vita e nei progressi medici. Le curve di maschi e femmine sono molto simili, suggerendo che i miglioramenti nel tempo hanno avuto un impatto uniforme su entrambi i sessi.
+
+Nel terzo grafico, $\gamma_t$ rappresenta l'effetto della coorte di nascita sulla mortalità. La forma delle curve mostra un effetto coorte con un picco intorno alla metà del XX secolo. Questo potrebbe riflettere condizioni di vita difficili o eventi storici particolari che hanno influenzato specifiche coorti. Anche in questo caso, le curve per maschi e femmine sono simili, con variazioni minime tra i sessi.
+
+In generale, i grafici indicano che i pattern di mortalità per età, periodo e coorte sono simili tra maschi e femmine, con alcune differenze di livello. Le osservazioni possono essere utilizzate per comprendere meglio le dinamiche di mortalità e sviluppare politiche sanitarie mirate.
+
+\newpage
+
+# MODELLO CBD
+
+Il modello di Cairns, Blake e Dowd (CBD) è utilizzato principalmente per la modellazione dei tassi di mortalità, in particolare nelle proiezioni attuariali. Questo modello si concentra sugli effetti dell'età e del tempo sui tassi di mortalità, senza includere esplicitamente l'effetto della coorte.
+
+Il modello CBD può essere descritto dalla seguente equazione:
+
+$$\logit(q_{x,t}) = \kappa_t^{(1)} + \kappa_t^{(2)}(x - \bar{x})$$
+
+Dove:
+- $\logit(q_{x,t})$ è il logit del tasso di mortalità a età $x$ nel tempo $t$.
+- $\kappa_t^{(1)}$ è il parametro del livello della mortalità nel tempo $t$.
+- $\kappa_t^{(2)}$ è il parametro della pendenza nel tempo $t$.
+- $x$ è l'età.
+- $\bar{x}$ è l'età media della popolazione considerata.
+
+Descrizione dei Parametri
+
+- $\kappa_t^{(1)}$: Parametro temporale che cattura il livello di mortalità per un dato anno $t$. È un indicatore del cambiamento nei livelli di mortalità nel tempo.
+- $\kappa_t^{(2)}$: Parametro temporale che cattura la variazione della pendenza dei tassi di mortalità rispetto all'età. Indica come la differenza di mortalità tra diverse età cambia nel tempo.
+- $x$: Età dell'individuo.
+- $\bar{x}$: Età media della popolazione. Serve a standardizzare l'effetto della pendenza attorno a un valore medio.
+
+Interpretazione del Modello CBD
+
+Il modello CBD è particolarmente utile per modellare la mortalità degli anziani, poiché tiene conto di come i tassi di mortalità cambiano con l'età e come questa relazione cambia nel tempo. La forma logit del tasso di mortalità aiuta a gestire i problemi di interpretazione dei tassi di mortalità vicini a 0 o 1.
+
+In sintesi, il modello di Cairns, Blake e Dowd è un potente strumento per le proiezioni della mortalità, focalizzandosi sugli effetti dell'età e del tempo senza la complicazione aggiuntiva della coorte, come invece fanno i modelli APC e di Renshaw-Haberman.
+
+### Fit del modello
+
+```{r FIT CBD, include=FALSE}
+CBDfit_SPAm <- fit(cbd(),
+                   data = SPAmStMoMoI,
+                   ages.fit = a.min:a.max,
+                   years.fit=y.fit.min:y.fit.max,
+                   wxt = wxt)
+CBDfit_SPAf <- fit(cbd(),
+                   data = SPAfStMoMoI,
+                   ages.fit = a.min:a.max,
+                   years.fit=y.fit.min:y.fit.max,
+                   wxt = wxt)
+```
+
+### stime dei parametri
+
+```{r PAR CBD}
+# Impostazione della griglia 1x2 per i grafici
+par(mfrow = c(1, 2))
+
+# Plot per kappa1[t]
+plot(CBDfit_SPAm$years, CBDfit_SPAm$kt[1, ], type = "l", col = "blue", 
+     ylab = expression(kappa[1, t]), xlab = "Anno", 
+     main = expression(kappa[1, t] ~ "vs. t"), 
+     ylim = range(c(CBDfit_SPAm$kt[1, ], CBDfit_SPAf$kt[1, ])))
+lines(CBDfit_SPAf$years, CBDfit_SPAf$kt[1, ], col = "red")
+legend("bottomleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per kappa2[t]
+plot(CBDfit_SPAm$years, CBDfit_SPAm$kt[2, ], type = "l", col = "blue", 
+     ylab = expression(kappa[2, t]), xlab = "Anno", 
+     main = expression(kappa[2, t] ~ "vs. t"), 
+     ylim = range(c(CBDfit_SPAm$kt[2, ], CBDfit_SPAf$kt[2, ])))
+lines(CBDfit_SPAf$years, CBDfit_SPAf$kt[2, ], col = "red")
+legend("bottomright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+```
+
+1.  **Effetto Livello (**$\kappa_t^{(1)}$):
+    -   Entrambi i grafici mostrano un trend decrescente, indicando una riduzione della mortalità nel tempo per entrambi i sessi.
+    -   I livelli di $\kappa_t^{(1)}$ sono generalmente più bassi per le femmine, riflettendo tassi di mortalità complessivamente più bassi rispetto ai maschi.
+2.  **Effetto Pendenza (**$\kappa_t^{(2)}$):
+    -   Entrambi i grafici mostrano un trend crescente, indicando un aumento della disparità nei tassi di mortalità tra le età giovani e anziane.
+    -   Il tasso di crescita di $\kappa_t^{(2)}$ è leggermente più elevato per le femmine, suggerendo che la differenza nella mortalità tra le età giovani e anziane è aumentata di più per le femmine rispetto ai maschi.
+
+-   **Riduzione della Mortalità**: La riduzione di $\kappa_t^{(1)}$ per entrambi i sessi riflette un miglioramento generale nelle condizioni di vita, nella sanità pubblica e nelle cure mediche, che ha portato a una diminuzione della mortalità.
+-   **Aumento della Disparità di Età**: L'aumento di $\kappa_t^{(2)}$ indica che, sebbene la mortalità complessiva sia diminuita, la disparità nei tassi di mortalità tra le età giovani e anziane è aumentata, probabilmente a causa dei maggiori benefici per le persone anziane rispetto a quelle giovani.
+
+In sintesi, i grafici mostrano tendenze simili per maschi e femmine, con una riduzione della mortalità complessiva e un aumento della disparità tra le età. Tuttavia, i livelli di mortalità sono generalmente più bassi per le femmine, e la disparità tra le età è aumentata leggermente di più per loro rispetto ai maschi.
+
+\newpage
+
+# MODELLO PLAT
+
+Il modello PLAT, sviluppato da H. Plat, è una estensione dei modelli di mortalità che combina elementi del modello di Lee-Carter e del modello CBD (Cairns-Blake-Dowd). Questo modello è utilizzato per catturare meglio le dinamiche della mortalità, includendo effetti di età, periodo e coorte.
+
+Il modello PLAT può essere descritto dalla seguente equazione:
+
+$$ \ln q_{x,t} = \alpha_x + \beta_x \kappa_t^{(1)} + \kappa_t^{(2)}(x - \bar{x}) + \gamma_t (x - \bar{x}) + \epsilon_{x,t} $$
+
+Dove: 
+- $q_{x,t}$ è il tasso di mortalità a età $x$ nel tempo $t$. 
+- $\alpha_x$ rappresenta il livello di mortalità specifico per età. 
+- $\beta_x$ è il parametro che modula l'effetto temporale $\kappa_t^{(1)}$ per età. 
+- $\kappa_t^{(1)}$ rappresenta l'effetto del periodo. 
+- $\kappa_t^{(2)}$ è il parametro che cattura la pendenza rispetto all'età. 
+- $\gamma_t$ è il parametro che cattura l'effetto della coorte. 
+- $\epsilon_{x,t}$ è il termine di errore. - $\bar{x}$ è l'età media della popolazione considerata.
+
+Componenti del Modello PLAT
+
+-   **Effetto Età (**$\alpha_x$): Questo parametro cattura il livello di mortalità specifico per età. Rappresenta la mortalità media per ogni età $x$ indipendentemente dal tempo.
+-   **Effetto Periodo (**$\beta_x \kappa_t^{(1)}$): $\beta_x$ modula l'effetto temporale $\kappa_t^{(1)}$ per età. Questo componente cattura come i cambiamenti nel tempo influenzano i tassi di mortalità per ciascuna età.
+-   **Effetto Pendenza (**$\kappa_t^{(2)} (x - \bar{x})$): Questo componente rappresenta la variazione della mortalità rispetto all'età. $\kappa_t^{(2)}$ cattura la pendenza, indicando come la differenza nei tassi di mortalità tra età giovani e anziane cambia nel tempo.
+-   **Effetto Coorte (**$\gamma_t (x - \bar{x})$): Questo parametro cattura l'effetto della coorte, cioè come le condizioni vissute da una generazione influenzano i tassi di mortalità. $\gamma_t$ modula l'effetto coorte rispetto all'età media.
+-   **Termine di errore (**$\epsilon_{x,t}$): Questo è il termine di errore che cattura le variazioni non spiegate dagli altri parametri del modello.
+
+Vantaggi del Modello PLAT
+
+-   **Flessibilità**: Combina elementi dei modelli Lee-Carter e CBD, fornendo una rappresentazione più completa delle dinamiche della mortalità.
+-   **Inclusione degli Effetti di Coorte**: Consente di catturare l'influenza delle condizioni vissute da diverse generazioni.
+
+Limiti del Modello PLAT
+
+-   **Complessità**: La combinazione di più effetti aumenta la complessità del modello e la difficoltà nella stima dei parametri.
+-   **Richiede Dati Dettagliati**: Per una stima accurata dei parametri, sono necessari dati dettagliati e di alta qualità sui tassi di mortalità.
+
+### fit del modello
+
+```{r FIT PLAT, include=FALSE}
+PLATfit_SPAm <- fit(PLAT,
+                    data = SPAmStMoMoI,
+                    ages.fit = a.min:a.max,
+                    years.fit=y.fit.min:y.fit.max,
+                    wxt = wxt)
+PLATfit_SPAf <- fit(PLAT,
+                    data = SPAfStMoMoI,
+                    ages.fit = a.min:a.max,
+                    years.fit=y.fit.min:y.fit.max,
+                    wxt = wxt)
+```
+
+### stime dei parametri
+
+```{r PAR PLAT}
+# Impostazione della griglia 2x2 per i grafici
+par(mfrow = c(2, 2))
+
+# Plot per alpha_x
+plot(PLATfit_SPAm$ages, PLATfit_SPAm$ax, type = "l", col = "blue", 
+     ylab = expression(alpha[x]), xlab = "Età", 
+     main = expression(alpha[x] ~ " (Maschi e Femmine)"), 
+     ylim = range(c(PLATfit_SPAm$ax, PLATfit_SPAf$ax), na.rm = TRUE))
+lines(PLATfit_SPAf$ages, PLATfit_SPAf$ax, col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per kappa1_t
+plot(PLATfit_SPAm$years, PLATfit_SPAm$kt[1, ], type = "l", col = "blue", 
+     ylab = expression(kappa[1, t]), xlab = "Anno", 
+     main = expression(kappa[1, t] ~ " (Maschi e Femmine)"), 
+     ylim = range(c(PLATfit_SPAm$kt[1, ], PLATfit_SPAf$kt[1, ]), na.rm = TRUE))
+lines(PLATfit_SPAf$years, PLATfit_SPAf$kt[1, ], col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per kappa2_t
+plot(PLATfit_SPAm$years, PLATfit_SPAm$kt[2, ], type = "l", col = "blue", 
+     ylab = expression(kappa[2, t]), xlab = "Anno", 
+     main = expression(kappa[2, t] ~ " (Maschi e Femmine)"), 
+     ylim = range(c(PLATfit_SPAm$kt[2, ], PLATfit_SPAf$kt[2, ]), na.rm = TRUE))
+lines(PLATfit_SPAf$years, PLATfit_SPAf$kt[2, ], col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per gamma vs cohort
+plot(PLATfit_SPAm$cohorts, PLATfit_SPAm$gc, type = "l", col = "blue", 
+     ylab = expression(gamma), xlab = "Coorte", 
+     main = expression(gamma ~ " (Maschi e Femmine)"), 
+     ylim = range(c(PLATfit_SPAm$gc, PLATfit_SPAf$gc), na.rm = TRUE))
+lines(PLATfit_SPAf$cohorts, PLATfit_SPAf$gc, col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+```
+
+Maschi
+
+Effetto Età ($\alpha_x$ vs. x) 
+- **Descrizione**: Il grafico mostra un andamento crescente con l'età, partendo da un valore basso nei primi anni di vita, un plateau intorno ai 20 anni, e poi un aumento costante dopo i 50 anni fino ai 100 anni. 
+Questo riflette l'aumento del rischio di mortalità con l'avanzare dell'età.
+
+Effetto Periodo ($\kappa_t^{(1)}$ vs. t) 
+- **Descrizione**: Il grafico mostra un trend decrescente dal 1950 al 2010. Questo indica una riduzione complessiva del rischio di mortalità nel tempo. La diminuzione di $\kappa_t^{(1)}$ suggerisce miglioramenti nelle condizioni di vita, nelle cure mediche e nella sanità pubblica nel corso del tempo.
+
+Effetto Pendenza ($\kappa_t^{(2)}$ vs. t) 
+- **Descrizione**: Il grafico mostra una tendenza decrescente leggera, con alcune fluttuazioni, dal 1950 al 2010. Questo indica una riduzione della differenza nei tassi di mortalità tra età giovani e anziane, suggerendo che i miglioramenti della mortalità sono stati relativamente omogenei tra le diverse età.
+
+Effetto Coorte ($\gamma_{t-x}$ vs. t-x) 
+- **Descrizione**: Il grafico mostra variazioni significative nel tempo, con un aumento per le coorti nate intorno al 1900, una diminuzione per le coorti nate tra il 1920 e il 1950, e un aumento per le coorti più recenti. Questo riflette le differenze nelle esperienze di vita e nelle condizioni socio-economiche delle diverse coorti.
+
+Femmine
+
+Effetto Età ($\alpha_x$ vs. x) 
+- **Descrizione**: Anche per le femmine, il grafico mostra un andamento crescente simile, con un aumento graduale che diventa più ripido dopo i 50 anni. L'andamento generale è simile a quello dei maschi, indicando che l'effetto dell'età sulla mortalità è consistente tra i sessi.
+
+Effetto Periodo ($\kappa_t^{(1)}$ vs. t) 
+- **Descrizione**: Il grafico mostra una tendenza decrescente dal 1950 al 2010, simile a quella dei maschi, ma con livelli generalmente più alti all'inizio. La riduzione della mortalità è evidente anche per le femmine, con miglioramenti significativi nel tempo.
+
+Effetto Pendenza ($\kappa_t^{(2)}$ vs. t) 
+- **Descrizione**: Il grafico mostra una tendenza decrescente leggera, con alcune fluttuazioni, dal 1950 al 2010, simile a quella dei maschi. Anche per le femmine, la riduzione della differenza nei tassi di mortalità tra età giovani e anziane suggerisce miglioramenti relativamente omogenei tra le diverse età.
+
+Effetto Coorte ($\gamma_{t-x}$ vs. t-x) 
+- **Descrizione**: Il grafico mostra variazioni significative nel tempo, con un aumento per le coorti nate intorno al 1900, una diminuzione per le coorti nate tra il 1920 e il 1950, e un aumento per le coorti più recenti, simile a quello dei maschi. Le esperienze di vita e le condizioni socio-economiche delle diverse coorti influenzano i tassi di mortalità anche per le femmine.
+
+Confronto
+
+1.  **Effetto Età (**$\alpha_x$):
+    -   Entrambi i sessi mostrano un aumento del rischio di mortalità con l'età, con un andamento molto simile.
+    -   L'aumento è più ripido dopo i 50 anni per entrambi i sessi.
+2.  **Effetto Periodo (**$\kappa_t^{(1)}$):
+    -   Entrambi i grafici mostrano una tendenza decrescente nel tempo, indicando una riduzione della mortalità.
+    -   I livelli iniziali di $\kappa_t^{(1)}$ sono leggermente più alti per le femmine, ma la tendenza generale è simile.
+3.  **Effetto Pendenza (**$\kappa_t^{(2)}$):
+    -   Entrambi i grafici mostrano una leggera tendenza decrescente con alcune fluttuazioni.
+    -   Questo suggerisce che i miglioramenti della mortalità sono stati relativamente omogenei tra le diverse età per entrambi i sessi.
+4.  **Effetto Coorte (**$\gamma_{t-x}$):
+    -   Entrambi i grafici mostrano variazioni significative nel tempo, con un andamento simile.
+    -   Le coorti nate intorno al 1900 mostrano un aumento della mortalità, seguito da una diminuzione per le coorti successive e un nuovo aumento per le coorti più recenti.
+
+Interpretazione Generale
+
+-   **Riduzione della Mortalità**: La riduzione di $\kappa_t^{(1)}$ per entrambi i sessi riflette miglioramenti nelle condizioni di vita e nelle cure mediche, che hanno portato a una diminuzione della mortalità.
+-   **Aumento Omogeneo della Mortalità per Età**: La leggera tendenza decrescente di $\kappa_t^{(2)}$ suggerisce che i miglioramenti nella mortalità sono stati relativamente uniformi tra le diverse età.
+-   **Variazioni di Coorte**: Le variazioni significative di $\gamma_{t-x}$ mostrano che le esperienze di vita e le condizioni socio-economiche delle diverse coorti hanno avuto un impatto notevole sui tassi di mortalità per entrambi i sessi.
+
+\newpage
+
+# MODELLO M7
+
+Il modello di mortalità M7 estende il modello CBD per catturare meglio le variazioni nei tassi di mortalità legati all'età, includendo un effetto quadratico dell'età. La formula del modello M7 è la seguente:
+
+$$ \text{logit}(q_x(t)) = \kappa_t^{(1)} + \kappa_t^{(2)} (x - \bar{x}) + \kappa_t^{(3)} \left((x - \bar{x})^2 - \sigma_x^2\right) + \gamma_t - \gamma_{t-x} $$
+
+Dove: 
+- $q_x(t)$ è la probabilità di morte all'età $x$ e al tempo $t$. 
+- $\text{logit}(q_x(t))$ è il logit della probabilità di morte, definito come $\log\left(\frac{q_x(t)}{1 - q_x(t)}\right)$. 
+- $\kappa_t^{(1)}$ è un termine temporale che cattura l'andamento complessivo della mortalità nel tempo. 
+- $\kappa_t^{(2)}$ è un termine che cattura l'effetto lineare dell'età sulla mortalità. 
+- $\kappa_t^{(3)}$ è un termine che cattura l'effetto quadratico dell'età sulla mortalità. 
+- $\bar{x}$ è l'età media nella popolazione considerata. 
+- $\sigma_x^2$ è la varianza dell'età nella popolazione considerata. 
+- $\gamma_t$ è un termine aggiuntivo per catturare ulteriori effetti temporali specifici. 
+- $\gamma_{t-x}$ è un effetto di coorte, considerando il tempo $t-x$.
+
+### Parametri del Modello
+
+I parametri del modello M7 sono:
+
+1.  $\kappa_t^{(1)}$: Rappresenta la tendenza temporale generale nella mortalità.
+2.  $\kappa_t^{(2)}$: Rappresenta l'effetto lineare dell'età sulla mortalità.
+3.  $\kappa_t^{(3)}$: Rappresenta l'effetto quadratico dell'età sulla mortalità.
+4.  $\gamma_t$: Termini specifici che catturano effetti addizionali dell'età e del tempo.
+5.  $\gamma_{t-x}$: Termini che catturano l'effetto di coorte.
+
+Stima dei Parametri
+
+La stima dei parametri $\kappa_t^{(1)}$, $\kappa_t^{(2)}$, $\kappa_t^{(3)}$, $\gamma_t$ e $\gamma_{t-x}$ viene generalmente effettuata tramite metodi di massimo di verosimiglianza o tramite metodi bayesiani, spesso utilizzando tecniche di ottimizzazione numerica.
+
+Vantaggi del Modello
+
+\-**Flessibilità**: Il modello M7 è più flessibile rispetto ai modelli di base come il CBD, grazie all'inclusione di ulteriori componenti che migliorano la capacità di catturare le variazioni della mortalità. -**Migliore Adattamento ai Dati**: Con l'aggiunta di κt(3)\kappa\_t\^{(3)}κt(3), il modello può adattarsi meglio ai dati di mortalità, soprattutto in età avanzata.
+
+Limiti del Modello
+
+\-**Complessità**: L'inclusione di ulteriori parametri rende il modello più complesso da stimare e interpretare rispetto ai modelli di base. -**Richiede Dati Dettagliati**: Necessita di dati dettagliati per tutte le dimensioni per fornire stime accurate.
+
+### fit del modello
+
+```{r FIT M7, include=FALSE}
+M7fit_SPAm <- fit(m7(link = "logit"),
+                  data =SPAmStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt)
+M7fit_SPAf <- fit(m7(link = "logit"),
+                  data = SPAfStMoMoI,
+                  ages.fit = a.min:a.max,
+                  years.fit=y.fit.min:y.fit.max,
+                  wxt = wxt)
+```
+
+### stime dei parametri
+
+```{r PAR M7}
+# Impostazione della griglia 2x2 per i grafici
+par(mfrow = c(2, 2))
+
+# Plot per kappa1
+plot(M7fit_SPAm$years, M7fit_SPAm$kt[1, ], type = "l", col = "blue", 
+     ylab = expression(kappa[1, t]), xlab = "Anno", 
+     main = expression(kappa[1, t]), 
+     ylim = range(c(M7fit_SPAm$kt[1, ], M7fit_SPAf$kt[1, ])))
+lines(M7fit_SPAf$years, M7fit_SPAf$kt[1, ], col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per kappa2
+plot(M7fit_SPAm$years, M7fit_SPAm$kt[2, ], type = "l", col = "blue", 
+     ylab = expression(kappa[2, t]), xlab = "Anno", 
+     main = expression(kappa[2, t]), 
+     ylim = range(c(M7fit_SPAm$kt[2, ], M7fit_SPAf$kt[2, ])))
+lines(M7fit_SPAf$years, M7fit_SPAf$kt[2, ], col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per kappa3
+plot(M7fit_SPAm$years, M7fit_SPAm$kt[3, ], type = "l", col = "blue", 
+     ylab = expression(kappa[3, t]), xlab = "Anno", 
+     main = expression(kappa[3, t]), 
+     ylim = range(c(M7fit_SPAm$kt[3, ], M7fit_SPAf$kt[3, ])))
+lines(M7fit_SPAf$years, M7fit_SPAf$kt[3, ], col = "red")
+legend("topright", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Plot per gamma vs cohort
+plot(M7fit_SPAm$cohorts, M7fit_SPAm$gc, type = "l", col = "blue", 
+     ylab = expression(gamma[t-x]), xlab = "Coorte", 
+     main = expression(gamma[t-x]))
+lines(M7fit_SPAf$cohorts, M7fit_SPAf$gc, col = "red")
+legend("topleft", legend = c("Maschi", "Femmine"), col = c("blue", "red"), 
+       lty = 1, bty = "n")
+
+# Reset della disposizione dei grafici
+par(mfrow = c(1, 1))
+```
+
+Confronto di $\kappa_t^{(1)}$ (tendenza temporale generale)
+
+**Maschi:** - Il valore di $\kappa_t^{(1)}$ è compreso tra -5.4 e -4.6. - C'è un trend decrescente generale dal 1950 fino agli anni 2010 con qualche variazione tra il 1970 e il 1990.
+
+**Femmine:** - Il valore di $\kappa_t^{(1)}$ è compreso tra -6.0 e -5.0. - Anche qui, c'è un trend decrescente generale dal 1950 fino agli anni 2010 con variazioni simili a quelle dei maschi.
+
+Confronto di $\kappa_t^{(2)}$ (effetto lineare dell'età)
+
+**Maschi:** - Il valore di $\kappa_t^{(2)}$ è compreso tra 0.02 e 0.08. - L'andamento è decrescente dal 1950 fino agli anni 1980, poi risale costantemente fino al 2010.
+
+**Femmine:** - Il valore di $\kappa_t^{(2)}$ è compreso tra 0.04 e 0.10. - L'andamento è simile a quello dei maschi, con una diminuzione fino agli anni 1980 e poi una risalita costante.
+
+Confronto di $\kappa_t^{(3)}$ (effetto quadratico dell'età)
+
+**Maschi:** - Il valore di $\kappa_t^{(3)}$ è compreso tra -0.0001 e 0.002. - L'andamento è decrescente costante dal 1950 al 2010.
+
+**Femmine:** - Il valore di $\kappa_t^{(3)}$ è compreso tra 0.000 e 0.003. - Anche qui, l'andamento è decrescente costante dal 1950 al 2010, ma con valori leggermente più alti rispetto ai maschi.
+
+Confronto di $\gamma_{t-x}$ (effetto di coorte)
+
+**Maschi:** - Il valore di $\gamma_{t-x}$ è compreso tra -4 e 4. - C'è un aumento dal 1850 fino ai primi del 1900, poi un calo fino agli anni 2000 e un successivo aumento.
+
+**Femmine:** - Il valore di $\gamma_{t-x}$ è compreso tra -4 e 4. - L'andamento è molto simile a quello dei maschi, con un aumento fino ai primi del 1900, un calo fino agli anni 2000 e un successivo aumento.
+
+-   **Tendenza generale (**$\kappa_t^{(1)}$): Entrambi i sessi mostrano un trend decrescente simile, anche se i valori per le femmine sono leggermente più bassi.
+-   **Effetto lineare dell'età (**$\kappa_t^{(2)}$): Simile per entrambi i sessi, ma i valori delle femmine sono più alti.
+-   **Effetto quadratico dell'età (**$\kappa_t^{(3)}$): Andamento decrescente per entrambi i sessi, con valori leggermente più alti per le femmine.
+-   **Effetto di coorte (**$\gamma_{t-x}$): Molto simile per entrambi i sessi, con una tendenza a lungo termine che include un aumento, una diminuzione e poi un altro aumento.
+
+Questi confronti suggeriscono che mentre i trend generali e le variazioni nei tassi di mortalità legati all'età sono simili per maschi e femmine, ci sono differenze nei valori specifici dei parametri, con le femmine che tendono ad avere valori leggermente più alti in alcuni parametri.
+
+
+\newpage
+
+# VALUTAZIONE BONTA' DI ADATTAMENTO
+
+Per valutare l’adeguatezza dei modelli fittati, analizziamo la loro bontà di adattamento utilizzando l'analisi dei residui e altri due indicatori: ML (Massima Verosimiglianza) e BIC (Criterio di Informazione Bayesiano). Massima Verosimiglianza (ML): Questo metodo stima i parametri che massimizzano la funzione di log-verosimiglianza, ossia quei parametri che rendono massima la probabilità logaritmica di osservare i dati forniti. Criterio di Informazione Bayesiano (BIC): Il BIC integra il metodo della massima verosimiglianza con un termine di penalità relativo al numero di parametri del modello, rendendolo un criterio di selezione più accurato rispetto al solo ML. Le tabelle seguenti riportano i valori di BIC e ML per ciascun modello, prima per la popolazione maschile e poi per quella femminile.
+
+##Residui
+
+```{r RES}
+LCres_SPAm <- residuals(LCfit_SPAm)
+LCres_SPAf <- residuals(LCfit_SPAf)
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(LCres_SPAm, type="colourmap", main = "LC_m Residuals", )
+plot(LCres_SPAf, type="colourmap", main = 'LC_f Residuals')
+```
+
+Il grafico dei residui maschili mostra alcune aree con residui significativi. Ci sono zone blu intorno agli anni '80 per le età 20-30, suggerendo che il modello ha sottostimato la mortalità in quel periodo per quella fascia d'età. Ci sono anche aree rosse, soprattutto nelle età più avanzate, che indicano sovrastime del modello. Nonostante queste variazioni, la distribuzione complessiva dei residui sembra abbastanza uniforme.
+
+Il grafico dei residui femminili presenta un pattern simile a quello dei maschi, con alcune differenze. Anche qui ci sono zone blu che indicano sottostime del modello, particolarmente evidenti negli anni '50 e '60 per le età più giovani.
+
+L'assenza di pattern chiari e consistenti nei residui suggerisce che il modello fornisce una buona rappresentazione complessiva dei dati di mortalità per maschi e femmine.
+
+```{r}
+RHres_SPAm <- residuals(RHfit_SPAm)
+RHres_SPAf <- residuals(RHfit_SPAf)
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+TYPE="colourmap"
+plot(RHres_SPAm, type=TYPE, main = "RH_m Residuals", )
+plot(RHres_SPAf, type=TYPE, main = 'RH_f Residuals')
+```
+
+Anche nel RH ci sono zone blu intorno agli anni '70 per le età 20-30, con uno sfalsamento temporale di una decade rispetto a LC, suggerendo che il modello ha sottostimato la mortalità in quel periodo per quella fascia d'età. Al contrario, ci sono alcune aree rosse, in particolare negli anni più recenti e intorno agli anni '50, che indicano sovrastime del modello. Il grafico dei residui femminili presenta un pattern simile a quello dei maschi anche qui, però, ci sono zone blu che indicano sottostime del modello, particolarmente evidenti negli anni '50 e '60 per le età più giovani. La distribuzione dei residui appare abbastanza uniforme, suggerendo che il modello cattura bene le dinamiche principali della mortalità, nel complesso il modello RH sembra adeguato per catturare le principali dinamiche di mortalità per entrambi i sessi.
+
+```{r}
+APCres_SPAm <- residuals(APCfit_SPAm)
+APCres_SPAf <- residuals(APCfit_SPAf)
+TYPE="colourmap"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(APCres_SPAm, type=TYPE, main = "APC_m Residuals", )
+plot(APCres_SPAf, type=TYPE, main = 'APC_f Residuals')
+```
+
+Come per l'RH ci sono zone blu intorno agli anni '70 per le età 20-30, suggerendo che il modello ha sottostimato la mortalità in quel periodo per quella fascia d'età e aree rosse, in particolare intorno agli anni '50 e negli anni più recenti, che indicano sovrastime del modello.
+
+Il grafico dei residui femminili presenta un pattern simile a quello dei maschi.
+
+La presenza di alcune aree con residui significativi indica che ci sono pattern di mortalità che il modello APC non cattura completamente. Tuttavia, l'assenza di pattern chiari e consistenti nei residui suggerisce che il modello fornisce una buona rappresentazione complessiva dei dati di mortalità per maschi e femmine. Nel complesso il modello APC sembra adeguato per catturare le principali dinamiche di mortalità per entrambi i sessi. Finora è il migliore in termini di residui.
+
+```{r}
+CBDres_SPAm <- residuals(CBDfit_SPAm)
+CBDres_SPAf <- residuals(CBDfit_SPAf)
+TYPE="colourmap"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(CBDres_SPAm, type=TYPE, main = "CBD_m Residuals", )
+plot(CBDres_SPAf, type=TYPE, main = 'CBD_f Residuals')
+```
+
+Il colour map evidenzia un modello generalmente buono, vista l'omogeneità dei colori, anche se sono evidente aree rosa quindi una leggera sottostima dai 20 ai 60 anni e per tutto il periodo considerato. Infatti, plottiamo in scala di grigi per averne una evidenza maggiore:
+
+```{r}
+CBDres_SPAm <- residuals(CBDfit_SPAm)
+CBDres_SPAf <- residuals(CBDfit_SPAf)
+TYPE="signplot"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(CBDres_SPAm, type=TYPE, main = "CBD_m Residuals", )
+plot(CBDres_SPAf, type=TYPE, main = 'CBD_f Residuals')
+```
+
+La scala di grigi, con il suo contrasto più netto, facilita l'identificazione delle aree in cui il modello ha prestazioni meno ottimali, consentendo un'analisi più dettagliata e mirata per miglioramenti futuri.
+
+```{r}
+PLATres_SPAm <- residuals(PLATfit_SPAm)
+PLATres_SPAf <- residuals(PLATfit_SPAf)
+TYPE="colourmap"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(PLATres_SPAm, type=TYPE, main = "PLAT_m Residuals", )
+plot(PLATres_SPAf, type=TYPE, main = 'PLAT_f Residuals')
+```
+
+Anche qui i grafici, mostrano una variazione dei residui attraverso gli anni. Per il grafico maschile, si osserva una sottostima più marcata nei periodi più recenti (2000 in poi) per le fasce di età più giovani e una sovrastima per le fasce di età anziane. Nel grafico femminile, la sottostima e la sovrastima mostrano un pattern simile Fino ad ora, insieme ad RH e PLAT presenta la miglior distribuzione.
+
+```{r RESM7 1}
+M7res_SPAm <- residuals(M7fit_SPAm)
+M7res_SPAf <- residuals(M7fit_SPAf)
+TYPE="colourmap"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(M7res_SPAm, type=TYPE, main = "M7_m Residuals", )
+plot(M7res_SPAf, type=TYPE, main = 'M7_f Residuals')
+```
+
+Anche qui, come per CBD, andiamo a verificare in scala di grigi:
+
+```{r RESM7}
+M7res_SPAm <- residuals(M7fit_SPAm)
+M7res_SPAf <- residuals(M7fit_SPAf)
+TYPE="signplot"
+par(mfrow=c(1,2), mfg = c(1, 1, 1, 2))
+plot(M7res_SPAm, type=TYPE, main = "M7_m Residuals", )
+plot(M7res_SPAf, type=TYPE, main = 'M7_f Residuals')
+```
+
+Insieme a CBD peggior modello in temrini di residui, con pattern evidenti eccessiva sovrastima e sottostima per determinate fasce di età.
+
+Scegliere il modello migliore tra questi richiede di trovare il compromesso tra la minore intensità dei residui e l'assenza di pattern sistematici. Scartando CBD e M7 a priori, abbiamo:
+
+Modello LC: Mostra una buona distribuzione uniforme dei residui senza pattern sistematici evidenti. Modello RH: Presenta alcune aree con discrepanze più marcate, specialmente nei maschi. Modello APC: Buona distribuzione, ma con alcune aree di intensità più elevata nei residui. Modello PLAT: Residui uniformi, ma con alcune aree di discrepanze evidenti.
+
+In ogni caso,il modello LC (Lee-Carter) sembra essere la scelta migliore in base ai residui, poiché mostra una distribuzione dei residui relativamente uniforme e senza pattern sistematici evidenti. Tuttavia, è sempre consigliabile combinare questa analisi con altre metriche di performance per una decisione più robusta.
+
+## log-likelihood
+
+La la log-verosimiglianza dei dati è la probabilità che i dati osservati siano generati dal modello. Più il valore di log-likelihood è alto (quindi meno negativo), maggiori sono le probabilità che il modello sia una buona rappresentazione dei dati.
+
+```{r LOG-L, include=FALSE}
+#Maschi
+LCfit_SPAm$loglik 
+CBDfit_SPAm$loglik
+RHfit_SPAm$loglik
+APCfit_SPAm$loglik
+M7fit_SPAm$loglik
+PLATfit_SPAm$loglik
+#Femmine
+LCfit_SPAf$loglik
+CBDfit_SPAf$loglik
+RHfit_SPAf$loglik
+APCfit_SPAf$loglik
+M7fit_SPAf$loglik
+PLATfit_SPAf$loglik
+```
+
+```{r LOG-L TABELLA}
+loglik_maschi <- c(   
+  LC = LCfit_SPAm$loglik,   
+  CBD = CBDfit_SPAm$loglik,   
+  RH = RHfit_SPAm$loglik,   
+  APC = APCfit_SPAm$loglik,   
+  M7 = M7fit_SPAm$loglik,   
+  PLAT = PLATfit_SPAm$loglik ) 
+
+loglik_femmine <- c(   
+  LC = LCfit_SPAf$loglik,   
+  CBD = CBDfit_SPAf$loglik,   
+  RH = RHfit_SPAf$loglik,   
+  APC = APCfit_SPAf$loglik,   
+  M7 = M7fit_SPAf$loglik,   
+  PLAT = PLATfit_SPAf$loglik )
+
+# Creare una tabella con i valori
+loglik_table <- data.frame(
+  Modello =names(loglik_maschi),
+  Maschi = loglik_maschi,
+  Femmine = loglik_femmine
+)
+
+# Ordinare la tabella per valori di log-likelihood (in ordine crescente)
+loglik_table_maschi <- loglik_table[order(-loglik_table$Maschi),]
+loglik_table_femmine <- loglik_table[order(-loglik_table$Femmine),]
+
+# Stampare le tabelle ordinate
+loglik_table_ordinata <- data.frame(
+  Modello = loglik_table_maschi$Modello,
+  Maschi = loglik_table_maschi$Maschi,
+  Femmine = loglik_table_femmine$Femmine[match(loglik_table_maschi$Modello, loglik_table_femmine$Modello)])
+ 
+print(loglik_table_ordinata)
+```
+
+In termini di Log verosimiglianza il migliore modello sembra essere l'RH, seguito da PLAT, LC e APC.
+
+In ogni caso, come abbbiamo visto per i residui CBD e M7 sono da scartare.
+
+## BIC
+
+Il BIC è invece un criterio di selezione del modello che penalizza i modelli complessi per ridurre il rischio di overfitting, tenendo conto sia della qualità di adattamento del modello ai dati (valutata tramite il log-likelihood) che della sua complessità.
+
+```{r BIC, include=FALSE}
+#Maschi
+BIC(LCfit_SPAm)
+BIC(CBDfit_SPAm)
+BIC(RHfit_SPAm)
+BIC(APCfit_SPAm)
+BIC(M7fit_SPAm)
+BIC(PLATfit_SPAm)
+
+#Femmine
+BIC(LCfit_SPAf)
+BIC(CBDfit_SPAf)
+BIC(RHfit_SPAf)
+BIC(APCfit_SPAf)
+BIC(M7fit_SPAf)
+BIC(PLATfit_SPAf)
+```
+
+```{r BIC TABELLA}
+bic_maschi <- c(
+  LC = BIC(LCfit_SPAm),   
+  CBD = BIC(CBDfit_SPAm),   
+  RH = BIC(RHfit_SPAm),   
+  APC = BIC(APCfit_SPAm),   
+  M7 = BIC(M7fit_SPAm),   
+  PLAT = BIC(PLATfit_SPAm)
+)
+
+# Valori BIC per femmine
+bic_femmine <- c(
+  LC = BIC(LCfit_SPAf),   
+  CBD = BIC(CBDfit_SPAf),   
+  RH = BIC(RHfit_SPAf),   
+  APC = BIC(APCfit_SPAf),   
+  M7 = BIC(M7fit_SPAf),   
+  PLAT = BIC(PLATfit_SPAf)
+)
+
+# Creare una tabella con i valori BIC
+bic_table <- data.frame(
+  Modello =names(bic_maschi),
+  Maschi = bic_maschi,
+  Femmine = bic_femmine
+)
+
+# Ordinare la tabella per valori BIC (in ordine crescente)
+bic_table_maschi <- bic_table[order(bic_table$Maschi),]
+bic_table_femmine <- bic_table[order(bic_table$Femmine),]
+
+# Creare una tabella ordinata mantenendo l'ordine dei maschi
+bic_table_ordinata <- data.frame(
+  Modello = bic_table_maschi$Modello,
+  Maschi = bic_table_maschi$Maschi,
+  Femmine = bic_table_femmine$Femmine[match(bic_table_maschi$Modello, bic_table_femmine$Modello)])
+
+# Stampare la tabella ordinata
+print(bic_table_ordinata)
+```
+
+Il BIC ci fornisce lo stesso risultato di Log Verosimiglianza, pertanto, andremo a fare le nostre considerazioni su questi 4 modelli.
+
+\newpage
+
+# PROIEZIONI
+
+## Proiezione con LC
+
+### Popolazione maschile
+
+```{r PROIEZIONE LC_m}
+LCfor_SPAm <- forecast(LCfit_SPAm, h=y.pred)
+plot(LCfor_SPAm, only.kt = T)
+```
+
+Il grafico mostra l'evoluzione temporale del parametro $\kappa_t^{(1)}$ nel modello di Lee-Carter, che cattura la componente temporale dei tassi di mortalità e riflette le variazioni nel tempo della mortalità complessiva. L'asse delle ascisse rappresenta gli anni, andando dal 1960 al 2080, con la parte storica del grafico basata su dati osservati fino al 2020 circa, e la parte successiva come proiezione futura. L'asse delle ordinate rappresenta i valori del parametro $\kappa_t^{(1)}$. Valori più bassi indicano tassi di mortalità complessivi più bassi, mentre valori più alti indicano tassi di mortalità più alti. La linea nera mostra l'andamento storico di $\kappa_t^{(1)}$ e la proiezione futura, evidenziando una tendenza decrescente che indica una riduzione dei tassi di mortalità nel tempo, coerente con l'aumento dell'aspettativa di vita. Le bande grigie rappresentano l'incertezza delle previsioni future, con la banda più scura che indica l'intervallo di confidenza più stretto e le bande più chiare che indicano intervalli di confidenza più ampi. L'ampiezza crescente delle bande nel tempo riflette l'aumento dell'incertezza man mano che ci si allontana nel futuro.
+
+Il modello di Lee-Carter suggerisce che i tassi di mortalità continueranno a diminuire nel futuro, come indicato dalla tendenza decrescente di $\kappa_t^{(1)}$. Tuttavia, le bande di incertezza evidenziano che, sebbene ci sia una chiara tendenza alla diminuzione, c'è una notevole incertezza associata a queste previsioni a lungo termine. Questo è tipico delle previsioni demografiche, dove fattori imprevisti come cambiamenti nelle politiche sanitarie, nuove malattie, innovazioni mediche, possono influenzare i risultati futuri.
+
+### Popolazione femminile
+
+```{r PROIEZIONE LC_f}
+LCfor_SPAf <- forecast(LCfit_SPAf, h=y.pred)
+plot(LCfor_SPAf, only.kt = T)
+```
+
+Il grafico della popolazione femminile, riflette quanto emerso per quella maschile. Le differenze principali rispetto al grafico precedente, possiamo osservarle in merito alle **Proiezioni Future**. Infatti, le bande di incertezza nel secondo grafico sembrano più ampie rispetto al primo grafico, suggerendo una maggiore incertezza nelle previsioni future. Questo potrebbe essere dovuto a una maggiore variabilità nei dati storici o a una differente modellizzazione delle previsioni future.
+
+\newpage
+
+## Proiezione con RH
+
+### Popolazione maschile
+
+```{r PROIEZIONE RH_m}
+RHfor_SPAm <- forecast(RHfit_SPAm, h=y.pred)
+par(mfrow = c(1,2))
+plot(RHfor_SPAm, only.kt = T)
+plot(RHfor_SPAm, only.gc = T)
+```
+
+### Popolazione femminile
+
+```{r PROIEZIONE RH_f}
+RHfor_SPAf <- forecast(RHfit_SPAf, h=y.pred)
+par(mfrow = c(1,2))
+plot(RHfor_SPAf, only.kt = T)
+plot(RHfor_SPAf, only.gc = T)
+```
+
+Andando a proiettare RH viene di nuovo in risalto che, nonostante BIC E L-L a favore e residui modestamente ottimali, questo modello non è abbastanza robusto per cui non lo considereremo più da ora in poi.
+
+\newpage
+
+## Proiezione con PLAT
+
+### Popolazione maschile
+
+```{r PROIEZIONE PLAT_m}
+PLATfor_SPAm <- forecast(PLATfit_SPAm, h=y.pred)
+par(mfrow = c(1,2))
+plot(PLATfor_SPAm, only.kt = T)
+plot(PLATfor_SPAm, only.gc = T)
+```
+
+Il primo grafico a sinistra rappresenta $\kappa_t^{(1)}$ rispetto al tempo (year). Questo parametro cattura l'andamento generale della mortalità nel tempo. La tendenza decrescente dal 1960 fino ai giorni nostri suggerisce un miglioramento continuo della mortalità nel corso del tempo. La banda grigia che si allarga verso il futuro indica l'incertezza nelle previsioni, con una variabilità crescente fino al 2080.
+
+Il secondo grafico a destra rappresenta $\kappa_t^{(2)}$ rispetto al tempo (year). Questa componente riflette ulteriori variazioni nella mortalità non spiegate dalla componente principale $\kappa_t^{(1)}$. Anche qui si osserva una tendenza decrescente, ma con una scala molto più piccola, indicando che queste variazioni aggiuntive hanno un'influenza minore. Le bande di incertezza sono più strette, suggerendo una minore variabilità nelle previsioni future per questa componente.
+
+Il terzo grafico, mostra $\gamma_{t-x}$ rispetto alla coorte (cohort). Questo parametro cattura gli effetti specifici della coorte sulla mortalità, evidenziando come le condizioni di nascita e le esperienze di vita influenzino la mortalità. Si osserva una variabilità storica con periodi di miglioramento e peggioramento della mortalità. Le proiezioni future indicano un'incertezza crescente, come mostrato dalla banda grigia che si allarga.
+
+### Popolazione femminile
+
+```{r PROIEZIONE PLAT_f}
+PLATfor_SPAf <- forecast(PLATfit_SPAf, h=y.pred)
+par(mfrow = c(1,2))
+plot(PLATfor_SPAf, only.kt = T)
+plot(PLATfor_SPAf, only.gc = T)
+```
+
+Il confronto tra questi grafici femminili e quelli precedenti per il modello Plat generale rivela alcune somiglianze e differenze chiave:
+
+1.  **Tendenza Generale**: In entrambi i set di grafici, si osserva una tendenza decrescente nelle componenti $\kappa_t^{(1)}$ e $\kappa_t^{(2)}$, indicando un miglioramento continuo della mortalità nel tempo.
+
+2.  **Incertezza nelle Previsioni**: le bande di incertezza per il modello femminile sembrano leggermente più strette rispetto a quelle del modello generale, suggerendo una minore variabilità nelle previsioni per la mortalità femminile.
+
+3.  **Effetti di Coorte**: La variabilità storica e le proiezioni future degli effetti di coorte ($\gamma_{t-x}$) sono presenti in entrambi i modelli. Tuttavia, i grafici femminili mostrano una gamma di valori leggermente diversa, indicando che le esperienze di vita specifiche delle donne possono influenzare in modo diverso la mortalità rispetto alla popolazione femminile.
+
+\newpage
+
+## Proiezione con APC
+
+### Popolazione maschile
+
+```{r PROIEZIONE APC_m}
+APCfor_SPAm <- forecast(APCfit_SPAm, h=y.pred)
+par(mfrow = c(1,2))
+plot(APCfor_SPAm, only.kt= T)
+plot(APCfor_SPAm, only.gc= T)
+```
+
+Grafico 1 (κ_t\^1 vs. t) Questo grafico mostra l'indice del periodo κ_t\^1 dal 1960 al 2080. La linea nera rappresenta i dati osservati fino al presente, mentre le bande grigie indicano le proiezioni future con il rispettivo intervallo di incertezza. Si osserva un declino costante dell'indice del periodo fino al presente, che continua nelle proiezioni future. L'incertezza aumenta man mano che ci si avvicina al 2080, come indicato dall'allargamento delle bande grigie.
+
+Grafico 2 (κ_t\^1 vs. t) Questo grafico è identico al primo e mostra lo stesso andamento dell'indice del periodo κ_t\^1 per i maschi. Il declino dell'indice suggerisce un miglioramento continuo delle condizioni di mortalità maschile nel tempo, con un'incertezza crescente nelle previsioni future.
+
+### Popolazione femminile
+
+```{r PROIEZIONE APC_f}
+APCfor_SPAf <- forecast(APCfit_SPAf, h=y.pred)
+par(mfrow = c(1,2))
+plot(APCfor_SPAf, only.kt= T)
+plot(APCfor_SPAf, only.gc= T)
+```
+
+Confronto Generale
+
+-   **Andamento Storico**: Sia per i maschi che per le femmine, l'indice del periodo κ_t\^1 mostra un declino costante, indicando un miglioramento delle condizioni di mortalità nel tempo.
+-   **Proiezioni Future**: Entrambi i sessi mostrano un aumento dell'incertezza nelle proiezioni future. Tuttavia, il trend di miglioramento continua, suggerendo che le condizioni di mortalità continueranno a migliorare.
+-   **Differenze di Genere**: Sebbene i grafici per maschi e femmine siano simili, le donne generalmente mostrano tassi di mortalità inferiori rispetto agli uomini, riflettendo una maggiore longevità.
+
+In sintesi, i grafici indicano un miglioramento storico della mortalità per entrambi i sessi, con proiezioni future che suggeriscono la continuazione di questa tendenza, ma con un'incertezza crescente.
+
+\newpage
+
+# CONFRONTO TASSI PROIETTATI E OSSERVATI
+
+## Confronto LC
+
+```{r CONFRONTO LC}
+par(mfrow=c(1, 2), oma=c(2,0,0,0))
+plot(c(a.min:a.max),log(LCfor_SPAm$rates[,y.pred]), bty="l", xlab="Ages", ylab="Male death rates (log scale)",
+     ylim=c(min(log(LCfor_SPAm$rates[,y.pred])),max(log((LCfit_SPAm$Dxt/LCfit_SPAm$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((LCfit_SPAm$Dxt/LCfit_SPAm$Ext)[,length(Y.fit)]), type="p")
+plot(c(a.min:a.max),log(LCfor_SPAf$rates[,y.pred]), bty="l", xlab="Ages", ylab="Female death rates (log scale)",
+     ylim=c(min(log(LCfor_SPAf$rates[,y.pred])),max(log((LCfit_SPAf$Dxt/LCfit_SPAf$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((LCfit_SPAf$Dxt/LCfit_SPAf$Ext)[,length(Y.fit)]), type="p")
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend("bottom", c("last observed", "last projected"), pch=c(1,-1), lty=c(0,1), lwd=c(1,1), col=c(1:1), cex=0.9)
+```
+
+Il confronto tra dati ossservati e proiettati ci fornisce una visione dell'accuratezza del modello, basandoci su come si muovono nel tempo le due linee. Abbiamo sulle ordinate il logaritmo dei tassi di mortalità e sulle ascisse le età da 0 a 100. Notiamo come i tassi proiettati seguano la tendenza di quelli osservati, suggerendo che la tendenza proseguirà nel futuro. In particolare, vediamo come la mortalità aumenta con l'età, fino al punto di coincidere nelle età più avanzate dove il progresso medico e tecnologico non è più capace di apportare effettivi miglioramenti.
+
+## Generazione delle probabilità di morte dai tassi osservati e proiettati - LC
+
+```{r PROB. LC}
+rates_LCfit_SPAm <- fitted(LCfit_SPAm, type = "rates")
+rates_LCfor_SPAm <- LCfor_SPAm$rates
+rates_LC_SPAm <- cbind(SPAmRates,rates_LCfor_SPAm)
+q_LC_SPAm <- 1- exp(-rates_LC_SPAm)
+# estensione delle probabilità qxt ad età estreme
+q_LC_SPAm.ext  <- extrapolation.fit(q_LC_SPAm)
+rates_LCfit_SPAf <- fitted(LCfit_SPAf, type = "rates")
+rates_LCfor_SPAf <- LCfor_SPAf$rates
+rates_LC_SPAf <- cbind(SPAfRates,rates_LCfor_SPAf)
+rates_LC_SPAf <- cbind(SPAfRates,rates_LCfor_SPAf)
+q_LC_SPAf <- 1- exp(-rates_LC_SPAf)
+# estensione delle probabilità qxt ad età estreme
+q_LC_SPAf.ext  <- extrapolation.fit(q_LC_SPAf)
+q_LC.SPAm<-as.data.frame(q_LC_SPAm.ext)
+q_LC.SPAf<-as.data.frame(q_LC_SPAf.ext)
+```
+
+## Rappresentazione probabilità proiettate
+
+```{r GRAPH. LC_m}
+# rappresentazione grafica delle probabilità proiettate
+par(mfrow = c(2,2))
+plot(extractCohort(q_LC_SPAm.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n LC_m",
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_LC_SPAm, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_LC_SPAm.ext/(1-q_LC_SPAm.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n LC_m" )
+lines(extractCohort(log(q_LC_SPAm/(1-q_LC_SPAm)), cohort = 1950), col = "blue")
+
+plot(extractCohort(q_LC_SPAf.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n LC_f" ,
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_LC_SPAf, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_LC_SPAf.ext/(1-q_LC_SPAf.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n LC_f" )
+lines(extractCohort(log(q_LC_SPAf/(1-q_LC_SPAf)), cohort = 1950), col = "blue")
+```
+
+I grafici mostrano le stime delle probabilità di morte (q(x)) in scala logaritmica e la loro trasformazione logit per la coorte del 1950, separati per maschi (LC_m) e femmine (LC_f), utilizzando il modello LC (Lee-Carter).
+
+Le probabilità di morte (q(x)) in scala logaritmica per i maschi (LC_m) mostrano un aumento costante con l'età. La trasformazione logit di queste probabilità riflette lo stesso pattern, con un incremento costante della mortalità con l'età.
+
+Per le femmine (LC_f), le probabilità di morte in scala logaritmica mostrano un trend simile.
+
+Le curve delle probabilità di morte in scala logaritmica per entrambe le categorie mostrano una forma concava all'inizio, diventando più ripida con l'aumentare dell'età. Questo riflette l'aumento accelerato della mortalità nelle età avanzate. Le trasformazioni logit delle probabilità di morte seguono un pattern simile, confermando la tendenza osservata.
+
+Per i maschi, le curve mostrano una variazione graduale nelle età giovanili, seguita da un aumento più rapido nelle età avanzate. Le curve per le femmine seguono un pattern simile, ma con un tasso di aumento della mortalità leggermente diverso nelle età avanzate rispetto ai maschi.
+
+Alle età molto giovani e molto avanzate, entrambe le curve mostrano una certa variabilità, che può essere dovuta alla minore quantità di dati disponibili per queste età, portando a una maggiore incertezza nelle stime.
+
+I grafici mostrano che il modello LC cattura bene le tendenze generali della mortalità per la coorte del 1950, il modello sembra fornire stime robuste delle probabilità di morte lungo l'intero arco della vita per la coorte analizzata.
+
+La coerenza tra osservati e proiettati indica che il modello ha avuto una buona capacità adattiva,
+
+## Probabilità di sopravvivenza e aspettative di vita proiettate - LC
+
+```{r prob_px LC}
+p_LC_SPAm.ext <- 1-q_LC_SPAm.ext                    # Probabilità di sopravvivenza a 1 anno
+p0n_LC_SPAm.ext <- apply(p_LC_SPAm.ext, 2, cumprod) # Probabilità di sopravvivenza a n anni
+ex_LC_SPAm.ext <- life.exp(q_LC_SPAm.ext)           # Aspettativa di vita
+
+p_LC_SPAf.ext <- 1-q_LC_SPAf.ext # 1 year survival probability
+p0n_LC_SPAf.ext <- apply(p_LC_SPAf.ext, 2, cumprod) # n year survival probability
+ex_LC_SPAf.ext <- life.exp(q_LC_SPAf.ext)
+
+p_LC.SPAm<-as.data.frame(p_LC_SPAm.ext)
+p0n_LC.SPAm<-as.data.frame(p0n_LC_SPAm.ext)
+ex_LC.SPAm<-as.data.frame(ex_LC_SPAm.ext)
+p_LC.SPAf<-as.data.frame(p_LC_SPAf.ext)
+p0n_LC.SPAf<-as.data.frame(p0n_LC_SPAf.ext)
+ex_LC.SPAf<-as.data.frame(ex_LC_SPAf.ext)
+```
+
+## Simulazioni - LC
+
+```{r sim LC}
+LCsim_SPAm.mrwd <- simulate(LCfit_SPAm, nsim = n.sim, h=y.pred)
+rates_LC_SPAm.st <- LCsim_SPAm.mrwd$rates
+q_LC_SPAm.st <- 1- exp(-rates_LC_SPAm.st)
+q_LC_SPAm.st.ext <-  extrapolation.sim(q_LC_SPAm.st)
+
+LCsim_SPAf.mrwd <- simulate(LCfit_SPAf, nsim = n.sim, h=y.pred)
+rates_LC_SPAf.st <- LCsim_SPAf.mrwd$rates
+q_LC_SPAf.st <- 1- exp(-rates_LC_SPAf.st)
+q_LC_SPAf.st.ext <-  extrapolation.sim(q_LC_SPAf.st)
+```
+
+### Indice temporali simulati - LC
+
+```{r sim graph LC_m}
+### rappresentazione grafica
+par(mfrow=c(1, 2))
+plot(LCfit_SPAm$years, LCfit_SPAm$kt[1, ], xlim = range(LCfit_SPAm$years, LCsim_SPAm.mrwd$kt.s$years),
+     ylim = range(LCfit_SPAm$kt, LCsim_SPAm.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt",
+     main = "Lee-Carter: 
+     Period index (mrwd)")
+matlines(LCsim_SPAm.mrwd$kt.s$years, LCsim_SPAm.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+plot(LCfit_SPAm$years, (LCfit_SPAm$Dxt / LCfit_SPAm$Ext)["65", ], xlim = range(LCfit_SPAm$years, LCsim_SPAm.mrwd$years),
+     ylim = range((LCfit_SPAm$Dxt / LCfit_SPAm$Ext)["65", ], LCsim_SPAm.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate",
+     main = "Lee-Carter: 
+     Simulated mortality rates 
+     at age 65")
+matlines(LCsim_SPAm.mrwd$years, LCsim_SPAm.mrwd$rates["65", , ], type = "l", lty = 1)
+```
+
+Il grafico a sinistra, il "Period index (mrwd)" mostra l'andamento dell'indice $k_t$ dal 1960 fino al 2080. La linea nera rappresenta i dati storici, mentre le linee colorate rappresentano le simulazioni future. L'indice $k_t$ è una componente del modello di Lee-Carter che cattura l'effetto del tempo sulla mortalità. Si osserva una tendenza decrescente nel tempo, indicante un miglioramento dei tassi di mortalità (ovvero una diminuzione della mortalità) con il passare degli anni. Le simulazioni future suggeriscono che questa tendenza al miglioramento continuerà, ma con una certa variabilità, come indicato dalla dispersione delle linee colorate.
+
+Nel grafico a destra, "Simulated mortality rates at age 65", vengono mostrati i tassi di mortalità simulati per l'età di 65 anni dal 1960 fino al 2080. Anche qui, la linea nera rappresenta i dati storici, mentre le linee colorate rappresentano le simulazioni future. I tassi di mortalità a 65 anni mostrano una tendenza decrescente, suggerendo un miglioramento della longevità e della salute nella popolazione anziana. La dispersione delle linee colorate nelle proiezioni future indica incertezza nelle previsioni, ma la tendenza generale sembra essere verso una continua diminuzione dei tassi di mortalità a questa età.
+
+In sintesi, questi grafici mostrano come il modello di Lee-Carter prevede un miglioramento continuo nei tassi di mortalità con il passare del tempo suggerendo che le persone vivranno più a lungo e in migliori condizioni di salute. Le simulazioni future, pur mostrando variabilità, confermano questa tendenza positiva.
+
+```{r sim graph LC_f}
+### rappresentazione grafica
+par(mfrow=c(1, 2))
+plot(LCfit_SPAf$years, LCfit_SPAf$kt[1, ], xlim = range(LCfit_SPAf$years, LCsim_SPAf.mrwd$kt.s$years),
+     ylim = range(LCfit_SPAf$kt, LCsim_SPAf.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt",
+     main = "Lee-Carter: 
+     Period index (mrwd)")
+matlines(LCsim_SPAf.mrwd$kt.s$years, LCsim_SPAf.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+plot(LCfit_SPAf$years, (LCfit_SPAf$Dxt / LCfit_SPAf$Ext)["65", ], xlim = range(LCfit_SPAf$years, LCsim_SPAf.mrwd$years),
+     ylim = range((LCfit_SPAf$Dxt / LCfit_SPAf$Ext)["65", ], LCsim_SPAf.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate",
+     main = "Lee-Carter: 
+     Simulated mortality rates 
+     at age 65")
+matlines(LCsim_SPAf.mrwd$years, LCsim_SPAf.mrwd$rates["65", , ], type = "l", lty = 1)
+```
+
+In generale, il Kt è simile a quello maschile. Mentre i tassi a 65 mostrano la stessa tendenza ma con una dispersione minore per cui c'è meno incertezza rispetto ai maschi.
+
+### Proiezione tassi di mortalità a diverse età - LC
+
+```{r sim2 graph LC}
+library("fanplot")
+par(mfrow=c(1, 1))
+probs = c(2.5, 10, 25, 50, 75, 90, 97.5)
+par(mfrow=c(1, 2))
+matplot(LCfit_SPAm$years, t(q_LC_SPAm[c("65", "75", "85"),c(1:length(Y.fit)) ]),
+        xlim = c(y.fit.min, (y.fit.max+y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "male mortality rate (log scale)")
+fan(t(LCsim_SPAm.mrwd$rates["65", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(LCsim_SPAm.mrwd$rates["75", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(LCsim_SPAm.mrwd$rates["85", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min+4, q_LC_SPAm[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+matplot(LCfit_SPAf$years, t(q_LC_SPAf[c("65", "75", "85"),c(1:length(Y.fit)) ]),
+        xlim = c(y.fit.min, (y.fit.max+y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "female mortality rate (log scale)")
+fan(t(LCsim_SPAf.mrwd$rates["65", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(LCsim_SPAf.mrwd$rates["75", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(LCsim_SPAf.mrwd$rates["85", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min+4, q_LC_SPAf[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+```
+
+Questi grafici mostrano i tassi di mortalità maschili e femminili su una scala logaritmica per tre diverse età (65, 75 e 85 anni) dal 1960 al 2080. Ogni serie di punti neri rappresenta i dati storici, e le aree colorate indicano le proiezioni future con intervalli di confidenza.
+
+Nel grafico dei tassi di mortalità maschili, possiamo osservare che i tassi di mortalità per tutte e tre le età (65, 75, 85) mostrano una tendenza decrescente dal 1960 fino ai giorni nostri. Le proiezioni future, rappresentate dalle bande colorate (nero per 65 anni, rosso per 75 anni, blu per 85 anni), suggeriscono che questa tendenza continuerà fino al 2080. Le aree colorate mostrano anche l'incertezza associata a queste proiezioni, con le bande che si allargano man mano che ci si allontana nel tempo, indicando una maggiore incertezza nelle previsioni a lungo termine.
+
+Il grafico dei tassi di mortalità femminili mostra una tendenza simile, con una maggiore variabilità nelle stime future.
+
+Questi grafici indicano chiaramente un miglioramento nei tassi di mortalità sia per gli uomini che per le donne in tutte le fasce di età considerate, con una diminuzione continua prevista per il futuro. Le aree di proiezione colorate evidenziano l'incertezza nelle previsioni, ma la tendenza generale suggerisce un prolungamento della vita e una diminuzione della mortalità con l'avanzare del tempo.
+
+\newpage
+
+## Confronto PLAT
+
+```{r CONFRONTO PLAT}
+par(mfrow=c(1, 2), oma=c(2,0,0,0))
+plot(c(a.min:a.max),log(PLATfor_SPAm$rates[,y.pred]), bty="l", xlab="Ages", ylab="Male death rates (log scale)",
+     ylim=c(min(log(PLATfor_SPAm$rates[,y.pred])),max(log((PLATfit_SPAm$Dxt/PLATfit_SPAm$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((PLATfit_SPAm$Dxt/PLATfit_SPAm$Ext)[,length(Y.fit)]), type="p")
+plot(c(a.min:a.max),log(PLATfor_SPAf$rates[,y.pred]), bty="l", xlab="Ages", ylab="Female death rates (log scale)",
+     ylim=c(min(log(PLATfor_SPAf$rates[,y.pred])),max(log((PLATfit_SPAf$Dxt/PLATfit_SPAf$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((PLATfit_SPAf$Dxt/PLATfit_SPAf$Ext)[,length(Y.fit)]), type="p")
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend("bottom", c("last observed", "last projected"), pch=c(1,-1), lty=c(0,1), lwd=c(1,1), col=c(1:1), cex=0.9)
+```
+
+Similmente a quanto detto in precedenza per il modello Lee-Carter, anche in questo caso i tassi osservati e proiettati hanno la stessa tendenza, indicando che questa proseguirà anche in futuro. Anche in questo caso il modello è stato piuttosto accurato.
+
+## Generazione delle probabilità di morte dai tassi osservati e proiettati - PLAT
+
+```{r PROB. PLAT}
+rates_PLATfit_SPAm <- fitted(PLATfit_SPAm, type = "rates")
+rates_PLATfor_SPAm <- PLATfor_SPAm$rates
+rates_PLAT_SPAm <- cbind(SPAmRates,rates_PLATfor_SPAm)
+q_PLAT_SPAm <- 1- exp(-rates_PLAT_SPAm)
+
+# estensione delle probabilità qxt ad età estreme
+q_PLAT_SPAm.ext  <- extrapolation.fit(q_PLAT_SPAm)
+rates_PLATfit_SPAf <- fitted(PLATfit_SPAf, type = "rates")
+rates_PLATfor_SPAf <- PLATfor_SPAf$rates
+rates_PLAT_SPAf <- cbind(SPAfRates,rates_PLATfor_SPAf)
+rates_PLAT_SPAf <- cbind(SPAfRates,rates_PLATfor_SPAf)
+q_PLAT_SPAf <- 1- exp(-rates_PLAT_SPAf)
+#### estensione delle probabilità qxt ad età estreme
+q_PLAT_SPAf.ext  <- extrapolation.fit(q_PLAT_SPAf)
+q_PLAT.SPAm<-as.data.frame(q_PLAT_SPAm.ext)
+q_PLAT.SPAf<-as.data.frame(q_PLAT_SPAf.ext)
+```
+
+## Rappresentazione probabilità proiettate
+
+```{r GRAPH. PLAT_m}
+# rappresentazione grafica delle probabilità proiettate
+par(mfrow = c(2,2))
+plot(extractCohort(q_PLAT_SPAm.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n PLAT_m",
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_PLAT_SPAm, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_PLAT_SPAm.ext/(1-q_PLAT_SPAm.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n PLAT_m")
+lines(extractCohort(log(q_PLAT_SPAm/(1-q_PLAT_SPAm)), cohort = 1950), col = "blue")
+
+plot(extractCohort(q_PLAT_SPAf.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n PLAT_f",
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_PLAT_SPAf, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_PLAT_SPAf.ext/(1-q_PLAT_SPAf.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n PLAT_f")
+lines(extractCohort(log(q_PLAT_SPAf/(1-q_PLAT_SPAf)), cohort = 1950), col = "blue")
+```
+
+Anche in questo caso, sia la componente maschile che femminile, si contraddistingue tra coerenza dati osservati e proiettati dal modello stesso. Pertanto, anche in questo caso il modello ha una buona capacità adattiva.
+
+Le probabilità di morte (q(x)) in scala logaritmica per i maschi (PLAT_m) mostrano un aumento con l'età, partendo da valori molto bassi nelle prime età fino ad aumentare significativamente nelle età avanzate. La trasformazione logit di queste probabilità riflette lo stesso pattern, con un incremento costante della mortalità con l'età.
+
+Per le femmine (PLAT_f), le probabilità di morte in scala logaritmica mostrano un trend simile, con un incremento costante della mortalità con l'età.
+
+Le curve delle probabilità di morte in scala logaritmica per entrambe le categorie mostrano una forma concava all'inizio, diventando più ripida con l'aumentare dell'età, il che è atteso dato che la mortalità tende ad aumentare esponenzialmente con l'età avanzata.
+
+I grafici mostrano che il modello PLAT cattura bene le tendenze generali della mortalità per la coorte del 1950, sia per i maschi che per le femmine. Le trasformazioni logit offrono una visione alternativa che conferma le tendenze osservate nelle probabilità di morte in scala logaritmica.
+
+## Probabilità di sopravvivenza e aspettative di vita proiettate - PLAT
+
+```{r prob_px PLAT}
+p_PLAT_SPAm.ext <- 1-q_PLAT_SPAm.ext                    # Probabilità di sopravvivenza a 1 anno
+p0n_PLAT_SPAm.ext <- apply(p_PLAT_SPAm.ext, 2, cumprod) # Probabilità di sopravvivenza a n anni
+ex_PLAT_SPAm.ext <- life.exp(q_PLAT_SPAm.ext)           # Aspettativa di vita
+
+p_PLAT_SPAf.ext <- 1-q_PLAT_SPAf.ext # 1 year survival probability
+p0n_PLAT_SPAf.ext <- apply(p_PLAT_SPAf.ext, 2, cumprod) # n year survival probability
+ex_PLAT_SPAf.ext <- life.exp(q_PLAT_SPAf.ext)
+
+p_PLAT.SPAm<-as.data.frame(p_PLAT_SPAm.ext)
+p0n_PLAT.SPAm<-as.data.frame(p0n_PLAT_SPAm.ext)
+ex_PLAT.SPAm<-as.data.frame(ex_PLAT_SPAm.ext)
+p_PLAT.SPAf<-as.data.frame(p_PLAT_SPAf.ext)
+p0n_PLAT.SPAf<-as.data.frame(p0n_PLAT_SPAf.ext)
+ex_PLAT.SPAf<-as.data.frame(ex_PLAT_SPAf.ext)
+```
+
+## Simulazioni - PLAT
+
+```{r sim PLAT}
+# Simulazione dei tassi di mortalità per uomini usando il modello PLAT
+PLATsim_SPAm.mrwd <- simulate(PLATfit_SPAm, nsim = n.sim, h = y.pred)
+rates_PLAT_SPAm.st <- PLATsim_SPAm.mrwd$rates
+q_PLAT_SPAm.st <- 1 - exp(-rates_PLAT_SPAm.st)
+q_PLAT_SPAm.st.ext <- extrapolation.sim(q_PLAT_SPAm.st)
+
+# Simulazione dei tassi di mortalità per donne usando il modello PLAT
+PLATsim_SPAf.mrwd <- simulate(PLATfit_SPAf, nsim = n.sim, h = y.pred)
+rates_PLAT_SPAf.st <- PLATsim_SPAf.mrwd$rates
+q_PLAT_SPAf.st <- 1 - exp(-rates_PLAT_SPAf.st)
+q_PLAT_SPAf.st.ext <- extrapolation.sim(q_PLAT_SPAf.st)
+```
+
+### Indice temporali simulati - PLAT
+
+```{r sim graph PLAT}
+# Rappresentazione grafica
+par(mfrow = c(2, 2))
+
+plot(PLATfit_SPAm$years, PLATfit_SPAm$kt[1, ], xlim = range(PLATfit_SPAm$years, PLATsim_SPAm.mrwd$kt.s$years), 
+     ylim = range(PLATfit_SPAm$kt, PLATsim_SPAm.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt", 
+     main = "PLAT: Period index (mrwd)")
+matlines(PLATsim_SPAm.mrwd$kt.s$years, PLATsim_SPAm.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+
+plot(PLATfit_SPAm$years, (PLATfit_SPAm$Dxt / PLATfit_SPAm$Ext)["65", ], xlim = range(PLATfit_SPAm$years, PLATsim_SPAm.mrwd$years), 
+     ylim = range((PLATfit_SPAm$Dxt / PLATfit_SPAm$Ext)["65", ], PLATsim_SPAm.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate", 
+     main = "PLAT: Simulated mortality 
+     rates at age 65")
+matlines(PLATsim_SPAm.mrwd$years, PLATsim_SPAm.mrwd$rates["65", , ], type = "l", lty = 1)
+
+plot(PLATfit_SPAm$cohorts, PLATfit_SPAm$gc,
+ xlim = range(PLATfit_SPAm$cohorts, PLATsim_SPAm.mrwd$gc.s$cohorts),
+ ylim = c(-1, 1.6),
+ type = "l",
+ xlab = "year",
+ ylab = "gc",
+ main = "PLAT indice gamma")
+matlines(PLATsim_SPAm.mrwd$gc.s$cohorts, PLATsim_SPAm.mrwd$gc.s$sim, type = "l", lty = 1)
+```
+
+tutti e tre i grafici indicano un miglioramento passato nella mortalità, ma con una significativa incertezza nelle proiezioni future. Questo suggerisce che mentre i miglioramenti nella mortalità sono stati costanti nel passato, le proiezioni future devono tenere conto di molte variabili che potrebbero influenzare l'andamento della mortalità in modi non prevedibili con certezza. Il modello PLAT, quindi, risponde meno bene del lee carter in termini di certezza. In particolare, l'indice gamma rimane relativamente stabile con alcune fluttuazioni fino circa al 2020. Dopo il 2020, le proiezioni future mostrano una maggiore variabilità, riflettendo incertezza sui futuri cambiamenti nella mortalità per le diverse coorti di nascita.
+
+```{r sim graph PLAT_}
+# Rappresentazione grafica
+par(mfrow = c(2, 2))
+
+plot(PLATfit_SPAf$years, PLATfit_SPAf$kt[1, ], xlim = range(PLATfit_SPAf$years, PLATsim_SPAf.mrwd$kt.s$years), 
+     ylim = range(PLATfit_SPAf$kt, PLATsim_SPAf.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt", 
+     main = "PLAT: Period index (mrwd)")
+matlines(PLATsim_SPAf.mrwd$kt.s$years, PLATsim_SPAf.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+
+plot(PLATfit_SPAf$years, (PLATfit_SPAf$Dxt / PLATfit_SPAf$Ext)["65", ], xlim = range(PLATfit_SPAf$years, PLATsim_SPAf.mrwd$years), 
+     ylim = range((PLATfit_SPAf$Dxt / PLATfit_SPAf$Ext)["65", ], PLATsim_SPAf.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate", 
+     main = "PLAT: Simulated mortality 
+     rates at age 65")
+matlines(PLATsim_SPAf.mrwd$years, PLATsim_SPAf.mrwd$rates["65", , ], type = "l", lty = 1)
+
+plot(PLATfit_SPAf$cohorts, PLATfit_SPAf$gc,
+ xlim = range(PLATfit_SPAf$cohorts, PLATsim_SPAf.mrwd$gc.s$cohorts),
+ ylim = c(-1, 1.6),
+ type = "l",
+ xlab = "year",
+ ylab = "gc",
+ main = "PLAT indice gamma")
+matlines(PLATsim_SPAf.mrwd$gc.s$cohorts, PLATsim_SPAf.mrwd$gc.s$sim, type = "l", lty = 1)
+```
+
+I grafici indicano che, sebbene entrambi i sessi mostrino tendenze simili fino al 2020, le proiezioni future presentano un'incertezza significativa. Le proiezioni femminili tendono a essere leggermente più stabili rispetto a quelle maschili, ma entrambe le serie mostrano una divergenza nelle previsioni future che riflette l'incertezza inerente nei modelli di mortalità a lungo termine.
+
+### Proiezione tassi di mortalità a diverse età - PLAT
+
+```{r sim2 graph PLAT}
+library("fanplot")
+par(mfrow=c(1, 1))
+probs = c(2.5, 10, 25, 50, 75, 90, 97.5)
+par(mfrow=c(1, 2))
+
+# Codice per la mortalità maschile
+matplot(PLATfit_SPAm$years, t(q_PLAT_SPAm[c("65", "75", "85"), c(1:length(Y.fit))]),
+        xlim = c(y.fit.min, (y.fit.max + y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "male mortality rate (log scale)")
+fan(t(PLATsim_SPAm.mrwd$rates["65", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(PLATsim_SPAm.mrwd$rates["75", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(PLATsim_SPAm.mrwd$rates["85", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min + 4, q_PLAT_SPAm[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+
+# Codice per la mortalità femminile
+matplot(PLATfit_SPAf$years, t(q_PLAT_SPAf[c("65", "75", "85"), c(1:length(Y.fit))]),
+        xlim = c(y.fit.min, (y.fit.max + y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "female mortality rate (log scale)")
+fan(t(PLATsim_SPAf.mrwd$rates["65", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(PLATsim_SPAf.mrwd$rates["75", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(PLATsim_SPAf.mrwd$rates["85", , ]), start = y.fit.max + 1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min + 4, q_PLAT_SPAf[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+```
+
+Nel pannello di sinistra, sono rappresentati i tassi di mortalità per gli uomini. Ogni gruppo di età è indicato con un colore specifico: nero per i 65 anni, rosso per i 75 anni e blu per gli 85 anni. I punti neri rappresentano i dati storici, mentre le bande colorate indicano le previsioni future con l'incertezza associata. Si osserva che, per tutte le fasce di età, il tasso di mortalità diminuisce in modo significativo dal 1960 fino al presente. Tuttavia, le previsioni future mostrano una crescente incertezza, evidenziata dall'allargamento delle bande colorate, che suggerisce una variabilità maggiore nelle stime man mano che ci si spinge verso il 2080.
+
+Nel pannello di destra, sono rappresentati i tassi di mortalità per le donne, con la stessa codifica dei colori per le diverse fasce di età. Anche qui, si osserva una riduzione significativa dei tassi di mortalità nel periodo storico, con una diminuzione più marcata rispetto agli uomini, suggerendo un miglioramento generale della longevità femminile. Le bande di incertezza per le previsioni future seguono un pattern simile a quello degli uomini, con un aumento dell'incertezza verso il 2080.
+
+In entrambe le rappresentazioni, l'incertezza delle previsioni è maggiore per le fasce di età più alte, come evidenziato dalle bande più larghe per i gruppi di 75 e 85 anni rispetto a quelle per i 65 anni. Questo riflette la complessità e la variabilità maggiore nel predire la mortalità per le persone più anziane.
+
+Complessivamente, il grafico indica una tendenza positiva verso la riduzione dei tassi di mortalità per entrambe le fasce di età e per entrambi i sessi, ma con una crescente incertezza nelle proiezioni future, soprattutto per le persone più anziane.
+
+\newpage
+
+## Confronto APC
+
+```{r CONFRONTO APC}
+par(mfrow=c(1, 2), oma=c(2,0,0,0))
+plot(c(a.min:a.max),log(APCfor_SPAm$rates[,y.pred]), bty="l", xlab="Ages", ylab="Male death rates (log scale)",
+     ylim=c(min(log(APCfor_SPAm$rates[,y.pred])),max(log((APCfit_SPAm$Dxt/APCfit_SPAm$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((APCfit_SPAm$Dxt/APCfit_SPAm$Ext)[,length(Y.fit)]), type="p")
+plot(c(a.min:a.max),log(APCfor_SPAf$rates[,y.pred]), bty="l", xlab="Ages", ylab="Female death rates (log scale)",
+     ylim=c(min(log(APCfor_SPAf$rates[,y.pred])),max(log((APCfit_SPAf$Dxt/APCfit_SPAf$Ext)[,length(Y.fit)]))), type="l")
+lines(c(a.min:a.max),log((APCfit_SPAf$Dxt/APCfit_SPAf$Ext)[,length(Y.fit)]), type="p")
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend("bottom", c("last observed", "last projected"), pch=c(1,-1), lty=c(0,1), lwd=c(1,1), col=c(1:1), cex=0.9)
+```
+
+In generale, i grafici rispecchiano l'andamento della mortalità, quindi in diminuzione per quella infantile e con un andamento crescente all'aumentare dell'età. La peculiarità, in tal caso, è che i tassi proiettati si discostano da quelli osservati verso il basso e questo per tutte le età; ciò è alquanto inverosimile, perchè è vero che può esserci un miglioramento della mortalità, ma è anche vero che le evidenze empiriche suggeriscono che oltre una certa età il destino è nelle mani della biologia e pertanto questo scostamento, che si riflette anche alle età superiori a 90 anni sta ad indicare un problema del modello.
+
+## Generazione delle probabilità di morte dai tassi osservati e proiettati - APC
+
+```{r PROB. APC}
+rates_APCfit_SPAm <- fitted(APCfit_SPAm, type = "rates")
+rates_APCfor_SPAm <- APCfor_SPAm$rates
+rates_APC_SPAm <- cbind(SPAmRates,rates_APCfor_SPAm)
+q_APC_SPAm <- 1- exp(-rates_APC_SPAm)
+
+# estensione delle probabilità qxt ad età estreme
+q_APC_SPAm.ext  <- extrapolation.fit(q_APC_SPAm)
+rates_APCfit_SPAf <- fitted(APCfit_SPAf, type = "rates")
+rates_APCfor_SPAf <- APCfor_SPAf$rates
+rates_APC_SPAf <- cbind(SPAfRates,rates_APCfor_SPAf)
+rates_APC_SPAf <- cbind(SPAfRates,rates_APCfor_SPAf)
+q_APC_SPAf <- 1- exp(-rates_APC_SPAf)
+#### estensione delle probabilità qxt ad età estreme
+q_APC_SPAf.ext  <- extrapolation.fit(q_APC_SPAf)
+q_APC.SPAm<-as.data.frame(q_APC_SPAm.ext)
+q_APC.SPAf<-as.data.frame(q_APC_SPAf.ext)
+```
+
+## Rappresentazione probabilità proiettate
+
+```{r GRAPH. APC_m}
+# rappresentazione grafica delle probabilità proiettate
+par(mfrow = c(2,2))
+plot(extractCohort(q_APC_SPAm.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n APC_m",
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_APC_SPAm, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_APC_SPAm.ext/(1-q_APC_SPAm.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n APC_m")
+lines(extractCohort(log(q_APC_SPAm/(1-q_APC_SPAm)), cohort = 1950), col = "blue")
+
+# rappresentazione grafica delle probabilità proiettate
+plot(extractCohort(q_APC_SPAf.ext, cohort = 1950), type = "p", log = "y", xlab =
+"age", ylab = "q(x)",
+ main = "Mortality rates (log scale) \n for the cohort 1950 \n APC_f",
+ ylim = c(0.0001, 1))
+lines(extractCohort(q_APC_SPAf, cohort = 1950), col = "blue")
+plot(extractCohort(log(q_APC_SPAf.ext/(1-q_APC_SPAf.ext)), cohort = 1950), type
+= "p", xlab = "age", ylab = "logit(q(x))",
+ main = "Logit transform of mortality rates \n for the cohort 1950 \n APC_f")
+lines(extractCohort(log(q_APC_SPAf/(1-q_APC_SPAf)), cohort = 1950), col = "blue")
+```
+
+Le probabilità di morte aumentano con l'età, mostrando una forma concava all'inizio che diventa più ripida con l'età avanzata. La trasformazione logit conferma questa tendenza.
+
+Per i maschi, le probabilità di morte mostrano una variazione più graduale nelle età giovanili, seguita da un aumento più rapido nelle età avanzate. Le curve per le femmine seguono un pattern simile, ma con un tasso di aumento della mortalità leggermente diverso nelle età avanzate rispetto ai maschi.
+
+Alle età molto giovani e molto avanzate, entrambe le curve mostrano una certa variabilità, probabilmente dovuta alla minore quantità di dati disponibili per queste età, che porta a maggiore incertezza nelle stime.
+
+In conclusione, il modello APC cattura bene le tendenze generali della mortalità per la coorte del 1950, sia per i maschi che per le femmine. Le trasformazioni logit offrono una visione alternativa e confermano le tendenze osservate nelle probabilità di morte in scala logaritmica. Nonostante alcune variazioni alle estremità delle curve, il modello sembra fornire stime robuste delle probabilità di morte lungo l'intero arco della vita per la coorte analizzata.
+
+## Probabilità di sopravvivenza e aspettative di vita proiettate - APC
+
+```{r prob_px APC}
+p_APC_SPAm.ext <- 1-q_APC_SPAm.ext                    # Probabilità di sopravvivenza a 1 anno
+p0n_APC_SPAm.ext <- apply(p_APC_SPAm.ext, 2, cumprod) # Probabilità di sopravvivenza a n anni
+ex_APC_SPAm.ext <- life.exp(q_APC_SPAm.ext)           # Aspettativa di vita
+
+p_APC_SPAf.ext <- 1-q_APC_SPAf.ext # 1 year survival probability
+p0n_APC_SPAf.ext <- apply(p_APC_SPAf.ext, 2, cumprod) # n year survival probability
+ex_APC_SPAf.ext <- life.exp(q_APC_SPAf.ext)
+
+p_APC.SPAm<-as.data.frame(p_APC_SPAm.ext)
+p0n_APC.SPAm<-as.data.frame(p0n_APC_SPAm.ext)
+ex_APC.SPAm<-as.data.frame(ex_APC_SPAm.ext)
+p_APC.SPAf<-as.data.frame(p_APC_SPAf.ext)
+p0n_APC.SPAf<-as.data.frame(p0n_APC_SPAf.ext)
+ex_APC.SPAf<-as.data.frame(ex_APC_SPAf.ext)
+```
+
+## Simulazioni - APC
+
+```{r sim APC}
+APCsim_SPAm.mrwd <- simulate(APCfit_SPAm, nsim = n.sim, h=y.pred)
+rates_APC_SPAm.st <- APCsim_SPAm.mrwd$rates
+q_APC_SPAm.st <- 1- exp(-rates_APC_SPAm.st)
+q_APC_SPAm.st.ext <-  extrapolation.sim(q_APC_SPAm.st)
+
+APCsim_SPAf.mrwd <- simulate(APCfit_SPAf, nsim = n.sim, h=y.pred)
+rates_APC_SPAf.st <- APCsim_SPAf.mrwd$rates
+q_APC_SPAf.st <- 1- exp(-rates_APC_SPAf.st)
+q_APC_SPAf.st.ext <-  extrapolation.sim(q_APC_SPAf.st)
+```
+
+### Indice temporali simulati - APC
+
+```{r sim graph APC}
+### rappresentazione grafica
+par(mfrow=c(2, 2))
+plot(APCfit_SPAm$years, APCfit_SPAm$kt[1, ], xlim = range(APCfit_SPAm$years, APCsim_SPAm.mrwd$kt.s$years),
+     ylim = range(APCfit_SPAm$kt, APCsim_SPAm.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt",
+     main = "APC: Period index (mrwd)")
+matlines(APCsim_SPAm.mrwd$kt.s$years, APCsim_SPAm.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+plot(APCfit_SPAm$years, (APCfit_SPAm$Dxt / APCfit_SPAm$Ext)["65", ], xlim = range(APCfit_SPAm$years, APCsim_SPAm.mrwd$years),
+     ylim = range((APCfit_SPAm$Dxt / APCfit_SPAm$Ext)["65", ], APCsim_SPAm.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate",
+     main = "APC: Simulated mortality rates at age 65")
+matlines(APCsim_SPAm.mrwd$years, APCsim_SPAm.mrwd$rates["65", , ], type = "l", lty = 1)
+plot(APCfit_SPAm$cohorts, APCfit_SPAm$gc,
+ xlim = range(APCfit_SPAm$cohorts, APCsim_SPAm.mrwd$gc.s$cohorts),
+ ylim = c(-1.9, 0.7),
+ type = "l",
+ xlab = "year",
+ ylab = "gc",
+ main = "APC indice gamma")
+matlines(APCsim_SPAm.mrwd$gc.s$cohorts, APCsim_SPAm.mrwd$gc.s$sim, type = "l", lty = 1)
+```
+
+Il grafico rappresenta le componenti del modello APC (Age-Period-Cohort) utilizzato per analizzare e prevedere i tassi di mortalità, e mostra tre sotto-grafici principali:
+
+1.  **Indice di periodo (mrwd)**: Dal 1960 al 2080, mostra una tendenza decrescente fino ai primi anni 2000, indicando un miglioramento delle condizioni di salute. Le proiezioni future sono varie, evidenziando incertezza nelle stime.
+
+2.  **Tassi di mortalità simulati all'età di 65 anni**: Dal 1960 al 2080, indicano una diminuzione dei tassi di mortalità fino al presente, con una continuazione prevista di questa tendenza. Anche qui, c'è una dispersione nelle previsioni future che indica incertezza.
+
+3.  **Indice gamma per coorte**: Dal 1850 al 2050, mostra un aumento fino alla metà del XX secolo seguito da una diminuzione. Le proiezioni future mostrano diverse possibili traiettorie con un'ampia incertezza.
+
+In sintesi, il modello APC evidenzia un miglioramento storico dei tassi di mortalità e una tendenza a lungo termine verso una riduzione continua, ma con una crescente incertezza nelle proiezioni future.
+
+```{r sim graph APC2}
+### rappresentazione grafica
+par(mfrow=c(2, 2))
+plot(APCfit_SPAf$years, APCfit_SPAf$kt[1, ], xlim = range(APCfit_SPAf$years, APCsim_SPAf.mrwd$kt.s$years),
+     ylim = range(APCfit_SPAf$kt, APCsim_SPAf.mrwd$kt.s$sim), type = "l", xlab = "year", ylab = "kt",
+     main = "APC: Period index (mrwd)")
+matlines(APCsim_SPAf.mrwd$kt.s$years, APCsim_SPAf.mrwd$kt.s$sim[1, , ], type = "l", lty = 1)
+plot(APCfit_SPAf$years, (APCfit_SPAf$Dxt / APCfit_SPAf$Ext)["65", ], xlim = range(APCfit_SPAf$years, APCsim_SPAf.mrwd$years),
+     ylim = range((APCfit_SPAf$Dxt / APCfit_SPAf$Ext)["65", ], APCsim_SPAf.mrwd$rates["65", , ]), type = "l", xlab = "year", ylab = "rate",
+     main = "APC: Simulated mortality rates at age 65")
+matlines(APCsim_SPAf.mrwd$years, APCsim_SPAf.mrwd$rates["65", , ], type = "l", lty = 1)
+plot(APCfit_SPAf$cohorts, APCfit_SPAf$gc,
+ xlim = range(APCfit_SPAf$cohorts, APCsim_SPAf.mrwd$gc.s$cohorts),
+ ylim = c(-1.9, 0.7),
+ type = "l",
+ xlab = "year",
+ ylab = "gc",
+ main = "APC indice gamma")
+matlines(APCsim_SPAf.mrwd$gc.s$cohorts, APCsim_SPAf.mrwd$gc.s$sim, type = "l", lty = 1)
+```
+
+Ancora una volta, c'è incertezza minore nei grafici femminili.
+
+### Proiezione tassi di mortalità a diverse età - APC
+
+```{r sim2 graph APC}
+library("fanplot")
+par(mfrow=c(1, 1))
+probs = c(2.5, 10, 25, 50, 75, 90, 97.5)
+par(mfrow=c(1, 2))
+matplot(APCfit_SPAm$years, t(q_APC_SPAm[c("65", "75", "85"),c(1:length(Y.fit)) ]),
+        xlim = c(y.fit.min, (y.fit.max+y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "male mortality rate (log scale)")
+fan(t(APCsim_SPAm.mrwd$rates["65", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(APCsim_SPAm.mrwd$rates["75", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(APCsim_SPAm.mrwd$rates["85", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min+4, q_APC_SPAm[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+matplot(APCfit_SPAf$years, t(q_APC_SPAf[c("65", "75", "85"),c(1:length(Y.fit)) ]),
+        xlim = c(y.fit.min, (y.fit.max+y.pred)), ylim = c(0.001, 0.2), pch = 20, col = "black",
+        log = "y", xlab = "year", ylab = "female mortality rate (log scale)")
+fan(t(APCsim_SPAf.mrwd$rates["65", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("black", "white")), ln = NULL)
+fan(t(APCsim_SPAf.mrwd$rates["75", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("red", "white")), ln = NULL)
+fan(t(APCsim_SPAf.mrwd$rates["85", , ]), start = y.fit.max+1, probs = probs, n.fan = 4,
+    fan.col = colorRampPalette(c("blue", "white")), ln = NULL)
+text(y.fit.min+4, q_APC_SPAf[c("65", "75", "85"), 30],
+     labels = c("x = 65", "x = 75", "x = 85"))
+```
+
+-   **Tassi storici**: I tassi di mortalità per tutte e tre le fasce di età (65, 75, 85) mostrano una tendenza decrescente dal 1960 fino ai giorni nostri, indicando un miglioramento della longevità sia maschile che femminile
+-   **Proiezioni future**: Le bande colorate (nero per 65 anni, rosso per 75 anni, blu per 85 anni) indicano le previsioni future fino al 2080. Si osserva una continuazione della tendenza decrescente, con un aumento dell'incertezza man mano che ci si avvicina al 2080, evidenziato dall'allargamento delle bande anche in questo caso per entrambi i sessi.
+-   **Differenze di genere**: Sebbene entrambi i sessi mostrino tendenze simili, le donne generalmente hanno tassi di mortalità più bassi rispetto agli uomini per le stesse fasce di età, riflettendo una longevità maggiore.
+
+In sintesi, il grafico evidenzia un miglioramento storico dei tassi di mortalità sia per uomini che per donne, con proiezioni future che suggeriscono un'ulteriore riduzione, ma con una crescente incertezza. Questo implica che, nonostante i progressi, ci sono ancora molte variabili imprevedibili che possono influenzare i tassi di mortalità a lungo termine.
+
+\newpage
+
+# BOOTSTRAP
+
+Nelle previsioni di mortalità, l'incertezza può derivare da diversi fattori, tra cui la complessità intrinseca del fenomeno e la stima dei parametri del modello. Spesso, gli intervalli di previsione tengono conto solo delle fluttuazioni casuali del fenomeno analizzato, trascurando l'incertezza legata alla stima dei parametri del modello. Tuttavia, questa componente può avere un impatto significativo sulla precisione delle previsioni. Per includere l'incertezza derivante dalla stima dei parametri del modello, si può utilizzare la tecnica del bootstrap. Questa tecnica statistica prevede la generazione ripetuta di campioni casuali con sostituzione dal campione originale. Su ciascun campione si stima il modello e si calcola la quantità di interesse, ottenendo così una distribuzione delle stime campionarie. Questa distribuzione viene poi utilizzata per determinare l'intervallo di confidenza o di previsione della quantità di interesse. In pratica, si parte dal campione originale e si generano B campioni casuali con sostituzione, stimando il modello su ciascun campione. Questo processo produce una distribuzione di B stime campionarie, che viene utilizzata per valutare l'incertezza e calcolare gli intervalli di previsione.
+
+## x LC
+
+```{r BS LC_m}
+LCboot_SPAm <- bootstrap(LCfit_SPAm, nBoot = n.boot, type = "semiparametric")
+par(mfrow=c(1, 1))
+plot(LCboot_SPAm, nCol = 3)
+LCsim_SPAm.boot <- simulate(LCboot_SPAm, nsim = n.sim/n.boot, h = y.pred)
+rates_LC_SPAm.boot.st <- LCsim_SPAm.boot$rates
+q_LC_SPAm.boot.st <- 1- exp(-rates_LC_SPAm.boot.st)
+q_LC_SPAm.boot.st.ext <-  extrapolation.sim(q_LC_SPAm.boot.st)
+```
+
+```{r BS LC_f}
+LCboot_SPAf <- bootstrap(LCfit_SPAf, nBoot = n.boot, type = "semiparametric")
+plot(LCboot_SPAf, nCol = 3)
+LCsim_SPAf.boot <- simulate(LCboot_SPAf, nsim = n.sim/n.boot, h = y.pred)
+rates_LC_SPAf.boot.st <- LCsim_SPAf.boot$rates
+q_LC_SPAf.boot.st <- 1- exp(-rates_LC_SPAf.boot.st)
+q_LC_SPAf.boot.st.ext <-  extrapolation.sim(q_LC_SPAf.boot.st)
+```
+
+In entrambi i sessi si evidenzia un aumento dello spessore del parametro $\beta_x^{(1)}$, ciò suggerisce che vi è maggiore incertezza o variabilità nella sensibilità della mortalità alle variazioni temporali per quelle specifiche età. Ciò potrebbe derivare da dati limitati o da una maggiore variabilità intrinseca nella mortalità per quelle fasce di età. Al contrario, un minore spessore indica stime più precise e meno variabili per $\beta_x^{(1)}$ in quelle età.
+
+Nel complesso, è più spesso nei primi anni di vita, da 0 a 25, per poi stabilizzarsi man mano. Per cui la maggior variabilità e incertezza è proprio nel primo quarto di vita degli individui.
+
+## x PLAT
+
+```{r BS PLAT_m}
+PLATboot_SPAm <- bootstrap(PLATfit_SPAm, nBoot = n.boot, type = "semiparametric")
+par(mfrow=c(1, 1))
+plot(PLATboot_SPAm, nCol = 3, parametricbx = F)
+PLATsim_SPAm.boot <- simulate(PLATboot_SPAm, nsim = n.sim/n.boot, h = y.pred)
+rates_PLAT_SPAm.boot.st <- PLATsim_SPAm.boot$rates
+q_PLAT_SPAm.boot.st <- 1- exp(-rates_PLAT_SPAm.boot.st)
+q_PLAT_SPAm.boot.st.ext <-  extrapolation.sim(q_PLAT_SPAm.boot.st)
+```
+
+```{r BS PLAT_f}
+PLATboot_SPAf <- bootstrap(PLATfit_SPAf, nBoot = n.boot, type = "semiparametric")
+plot(PLATboot_SPAf, nCol = 3, parametricbx = F)
+PLATsim_SPAf.boot <- simulate(PLATboot_SPAf, nsim = n.sim/n.boot, h = y.pred)
+rates_PLAT_SPAf.boot.st <- PLATsim_SPAf.boot$rates
+q_PLAT_SPAf.boot.st <- 1- exp(-rates_PLAT_SPAf.boot.st)
+q_PLAT_SPAf.boot.st.ext <-  extrapolation.sim(q_PLAT_SPAf.boot.st)
+```
+
+Nel modello Plat, lo spessore delle linee dei parametri indica la variabilità e l'incertezza delle stime. La sottigliezza delle linee per $\alpha_x$, $\kappa_t^{(1)}$, e $\kappa_t^{(2)}$ suggerisce stime precise e bassa variabilità per questi parametri. Al contrario, la variabilità nello spessore della linea di $\gamma_{t-x}$ indica maggiore incertezza nelle stime dell'effetto di coorte, riflettendo potenziali differenze significative nelle esperienze di mortalità tra le coorti.
+
+## x APC
+
+```{r BS APC_m}
+APCboot_SPAm <- bootstrap(APCfit_SPAm, nBoot = n.boot, type = "semiparametric")
+par(mfrow=c(1, 1))
+plot(APCboot_SPAm, nCol = 3, parametricbx = F)
+APCsim_SPAm.boot <- simulate(APCboot_SPAm, nsim = n.sim/n.boot, h = y.pred)
+rates_APC_SPAm.boot.st <- APCsim_SPAm.boot$rates
+q_APC_SPAm.boot.st <- 1- exp(-rates_APC_SPAm.boot.st)
+q_APC_SPAm.boot.st.ext <-  extrapolation.sim(q_APC_SPAm.boot.st)
+```
+
+```{r BS APC_f}
+APCboot_SPAf <- bootstrap(APCfit_SPAf, nBoot = n.boot, type = "semiparametric")
+plot(APCboot_SPAf, nCol = 3, parametricbx = F)
+APCsim_SPAf.boot <- simulate(APCboot_SPAf, nsim = n.sim/n.boot, h = y.pred)
+rates_APC_SPAf.boot.st <- APCsim_SPAf.boot$rates
+q_APC_SPAf.boot.st <- 1- exp(-rates_APC_SPAf.boot.st)
+q_APC_SPAf.boot.st.ext <-  extrapolation.sim(q_APC_SPAf.boot.st)
+```
+
+Lo spessore del grafico dell'indice gamma ($\gamma_{t-x}$) nel modello APC (Age-Period-Cohort) bootstrappato indica la variabilità e l'incertezza nelle stime dell'effetto di coorte. Un maggiore spessore suggerisce una variabilità più alta tra le diverse coorti e una maggiore incertezza nelle stime.
+
+Nel grafico, la variabilità è relativamente ridotta dal 1850 fino ai primi anni del 1900, indicando una maggiore certezza nelle stime di queste coorti. Tuttavia, lo spessore aumenta significativamente per le coorti nate intorno alla metà del XX secolo, riflettendo una maggiore variabilità e incertezza dovuta ai grandi cambiamenti sociali e sanitari di quel periodo, come le guerre mondiali e i progressi medici.
+
+Per le coorti più recenti, lo spessore decresce, suggerendo una standardizzazione delle condizioni di vita e dei progressi medici. In sintesi, lo spessore del gamma evidenzia le variazioni e l'incertezza nella mortalità tra le diverse coorti nel tempo.
+
+\newpage
+
+# INTERVALLI DI CONFIDENZA
+
+Attraverso diversi comandi in R saranno individuati i quantili della distribuzione originale e dei dati campionati attraverso il bootstrap, per poi individuare le regioni di confidenza per le probabilità di morte stimate dai due modelli.
+
+## x LC
+
+```{r CI LC}
+
+conf.lev <- 0.9
+q_LC_SPAm.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAm.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAm.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAm.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_LC_SPAm.q95[j,k] <- quantile(q_LC_SPAm.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_LC_SPAm.q05[j,k] <- quantile(q_LC_SPAm.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_LC_SPAm.boot.q95[j,k] <- quantile(q_LC_SPAm.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_LC_SPAm.boot.q05[j,k] <- quantile(q_LC_SPAm.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+
+q_LC_SPAf.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAf.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAf.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_LC_SPAf.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_LC_SPAf.q95[j,k] <- quantile(q_LC_SPAf.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_LC_SPAf.q05[j,k] <- quantile(q_LC_SPAf.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_LC_SPAf.boot.q95[j,k] <- quantile(q_LC_SPAf.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_LC_SPAf.boot.q05[j,k] <- quantile(q_LC_SPAf.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+q_LC.SPAm.q95<-as.data.frame(q_LC_SPAm.q95)
+q_LC.SPAm.q05<-as.data.frame(q_LC_SPAm.q05)
+q_LC.SPAm.boot.q95<-as.data.frame(q_LC_SPAm.boot.q95)
+q_LC.SPAm.boot.q05<-as.data.frame(q_LC_SPAm.boot.q05)
+q_LC.SPAf.q95<-as.data.frame(q_LC_SPAf.q95)
+q_LC.SPAf.q05<-as.data.frame(q_LC_SPAf.q05)
+q_LC.SPAf.boot.q95<-as.data.frame(q_LC_SPAf.boot.q95)
+q_LC.SPAf.boot.q05<-as.data.frame(q_LC_SPAf.boot.q05)
+```
+
+## x PLAT
+
+```{r CI PLAT}
+
+conf.lev <- 0.9
+q_PLAT_SPAm.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAm.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAm.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAm.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_PLAT_SPAm.q95[j,k] <- quantile(q_PLAT_SPAm.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_PLAT_SPAm.q05[j,k] <- quantile(q_PLAT_SPAm.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_PLAT_SPAm.boot.q95[j,k] <- quantile(q_PLAT_SPAm.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_PLAT_SPAm.boot.q05[j,k] <- quantile(q_PLAT_SPAm.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+
+q_PLAT_SPAf.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAf.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAf.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_PLAT_SPAf.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_PLAT_SPAf.q95[j,k] <- quantile(q_PLAT_SPAf.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_PLAT_SPAf.q05[j,k] <- quantile(q_PLAT_SPAf.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_PLAT_SPAf.boot.q95[j,k] <- quantile(q_PLAT_SPAf.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_PLAT_SPAf.boot.q05[j,k] <- quantile(q_PLAT_SPAf.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+q_PLAT.SPAm.q95<-as.data.frame(q_PLAT_SPAm.q95)
+q_PLAT.SPAm.q05<-as.data.frame(q_PLAT_SPAm.q05)
+q_PLAT.SPAm.boot.q95<-as.data.frame(q_PLAT_SPAm.boot.q95)
+q_PLAT.SPAm.boot.q05<-as.data.frame(q_PLAT_SPAm.boot.q05)
+q_PLAT.SPAf.q95<-as.data.frame(q_PLAT_SPAf.q95)
+q_PLAT.SPAf.q05<-as.data.frame(q_PLAT_SPAf.q05)
+q_PLAT.SPAf.boot.q95<-as.data.frame(q_PLAT_SPAf.boot.q95)
+q_PLAT.SPAf.boot.q05<-as.data.frame(q_PLAT_SPAf.boot.q05)
+```
+
+## x APC
+
+```{r CI APC}
+
+conf.lev <- 0.9
+q_APC_SPAm.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAm.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAm.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAm.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_APC_SPAm.q95[j,k] <- quantile(q_APC_SPAm.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_APC_SPAm.q05[j,k] <- quantile(q_APC_SPAm.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_APC_SPAm.boot.q95[j,k] <- quantile(q_APC_SPAm.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_APC_SPAm.boot.q05[j,k] <- quantile(q_APC_SPAm.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+
+q_APC_SPAf.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAf.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAf.boot.q95 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+q_APC_SPAf.boot.q05 <- matrix(0, nrow=(omega-a.min),ncol=y.pred, dimnames=list(c(a.min:(omega-1)), c((tail(Y.fit,1)+1):(tail(Y.fit,1)+y.pred))))
+for (j in 1:(omega-a.min)){
+  for (k in 1:y.pred){
+    q_APC_SPAf.q95[j,k] <- quantile(q_APC_SPAf.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_APC_SPAf.q05[j,k] <- quantile(q_APC_SPAf.st.ext[j,k,], probs=(1-conf.lev)/2)
+    q_APC_SPAf.boot.q95[j,k] <- quantile(q_APC_SPAf.boot.st.ext[j,k,], probs=0.5+conf.lev/2)
+    q_APC_SPAf.boot.q05[j,k] <- quantile(q_APC_SPAf.boot.st.ext[j,k,], probs=(1-conf.lev)/2)
+  }
+}
+q_APC.SPAm.q95<-as.data.frame(q_APC_SPAm.q95)
+q_APC.SPAm.q05<-as.data.frame(q_APC_SPAm.q05)
+q_APC.SPAm.boot.q95<-as.data.frame(q_APC_SPAm.boot.q95)
+q_APC.SPAm.boot.q05<-as.data.frame(q_APC_SPAm.boot.q05)
+q_APC.SPAf.q95<-as.data.frame(q_APC_SPAf.q95)
+q_APC.SPAf.q05<-as.data.frame(q_APC_SPAf.q05)
+q_APC.SPAf.boot.q95<-as.data.frame(q_APC_SPAf.boot.q95)
+q_APC.SPAf.boot.q05<-as.data.frame(q_APC_SPAf.boot.q05)
+```
+
+## Confronto grafico LC-PLAT-APC 65enne maschio
+
+```{r CI CONFRONTO 65 ENNI_M}
+par(mfrow=c(1,3))
+plot(q_LC_SPAm.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_LC_SPAm.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAm.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAm.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_LC_SPAm.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_PLAT_SPAm.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_PLAT_SPAm.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAm.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAm.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_PLAT_SPAm.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_APC_SPAm.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_APC_SPAm.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAm.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAm.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_APC_SPAm.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+```
+
+Il grafico mostra i tassi di mortalità osservati e previsti con i rispettivi intervalli di confidenza per tre modelli diversi: Lee-Carter, Plat e APC. Ogni pannello rappresenta i tassi di mortalità per le persone di 65 anni dal 1960 al 2080. Le linee nere solide rappresentano i tassi di mortalità osservati e previsti, mentre le linee tratteggiate rappresentano gli intervalli di confidenza (95% e 5% quantili) e le linee rosse tratteggiate rappresentano gli intervalli di confidenza bootstrappati.
+
+-   **Tendenze di Mortalità**: Tutti e tre i modelli mostrano una tendenza storica decrescente dei tassi di mortalità per le persone di 65 anni, con previsioni future che indicano ulteriori diminuzioni.
+-   **Incertezza nelle Proiezioni**: Gli intervalli di confidenza mostrano una crescente incertezza nelle previsioni future per tutti e tre i modelli. Il modello Lee-Carter ha gli intervalli di confidenza più stretti, seguito dal modello Plat, mentre il modello APC mostra la maggiore incertezza.
+-   **Confronto tra Modelli**: Il modello Lee-Carter offre le previsioni più stabili e precise, mentre il modello APC evidenzia una maggiore incertezza e variabilità nelle previsioni future.
+
+Questo grafico fornisce una chiara comparazione delle prestazioni dei tre modelli in termini di previsione dei tassi di mortalità e della rispettiva incertezza, evidenziando l'affidabilità e i limiti di ciascun approccio.
+
+## Confronto grafico LC-PLAT-APC 90enne maschio
+
+```{r CI CONFRONTO 90 ENNI_M}
+par(mfrow=c(1,3))
+plot(q_LC_SPAm.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_LC_SPAm.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAm.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAm.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_LC_SPAm.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_PLAT_SPAm.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_PLAT_SPAm.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAm.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAm.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_PLAT_SPAm.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_APC_SPAm.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_APC_SPAm.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAm.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAm.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_APC_SPAm.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+```
+
+Anche per il caso dei 90enni le evidenze sono le medesime espresse in precedenza. Il modello lee carter offre le previsioni più stabili e precise.
+
+## Confronto grafico LC-PLAT-APC 65enne femmina
+
+```{r CI CONFRONTO 65 ENNI}
+par(mfrow=c(1,3))
+plot(q_LC_SPAf.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_LC_SPAf.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAf.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAf.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_LC_SPAf.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_PLAT_SPAf.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_PLAT_SPAf.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAf.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAf.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_PLAT_SPAf.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_APC_SPAf.ext["65",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_APC_SPAf.q95["65",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAf.q05["65",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAf.boot.q95["65",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_APC_SPAf.boot.q05["65",], x=Y.pred, type="l", lty=2, col=2)
+```
+
+## Confronto grafico LC-PLAT-APC 90enne femmina
+
+```{r CI CONFRONTO 90 ENNI}
+par(mfrow=c(1,3))
+plot(q_LC_SPAf.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_LC_SPAf.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAf.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_LC_SPAf.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_LC_SPAf.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_PLAT_SPAf.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_PLAT_SPAf.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAf.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_PLAT_SPAf.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_PLAT_SPAf.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+
+plot(q_APC_SPAf.ext["90",],x=c(Y.fit,Y.pred), type="l", lty=1) # evolution with t (same age)
+lines(q_APC_SPAf.q95["90",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAf.q05["90",], x=Y.pred, type="l", lty=2)
+lines(q_APC_SPAf.boot.q95["90",], x=Y.pred, type="l", lty=2, col=2)
+lines(q_APC_SPAf.boot.q05["90",], x=Y.pred, type="l", lty=2, col=2)
+```
+
+Le evidenze per la popolazione femminile sono le medesime espresse per la popolazione maschile, con la peculiarità femminile di avere intervalli di confidenza meno ampi e quindi c'è meno incertezza di previsione. Inoltre, entrambi i sessi vedono tendenze decrescenti per la mortalità, con la popolazione femminile che si posiziona piu in basso, quindi con tassi più bassi.
+
+Stabilità delle Previsioni: A 65 anni, le previsioni future sono più stabili e con una minore dispersione, soprattutto nei modelli LC e PLAT. A 90 anni, c'è una maggiore variabilità nei valori futuri, indicando una maggiore incertezza nelle previsioni.
+
+Intervallo di Confidenza: Gli intervalli di confidenza sono più stretti a 65 anni rispetto a 90 anni, suggerendo che le previsioni a 65 anni sono più affidabili. Il modello PLAT mostra una maggiore variabilità nei valori futuri a 90 anni rispetto agli altri modelli. Modello APC:
+
+Il modello APC mostra una dispersione più ampia nei valori futuri sia a 65 che a 90 anni, indicando una maggiore incertezza rispetto agli altri modelli.
+
+In conclusione le probabilità di morte mostrano una tendenza decrescente fino al 2020 in tutti i modelli e per entrambe le età considerate. Tuttavia, le previsioni future a 90 anni mostrano una maggiore variabilità e incertezza rispetto a quelle a 65 anni. Il modello LC tende a fornire previsioni più stabili e affidabili, mentre il modello APC mostra una maggiore incertezza nelle previsioni future. Il modello PLAT mostra una buona stabilità a 65 anni, ma una maggiore variabilità a 90 anni.
+
+\newpage
+
+# ANNUITY
+
+##x LC
+
+### Calcolo probabilità di sopravvivenza e aspettativa di vita
+
+```{r Px ex}
+p_LC_SPAm.q95 <- 1-q_LC_SPAm.q95# 1 year survival probability
+p0n_LC_SPAm.q95 <- apply(p_LC_SPAm.q95, 2, cumprod) # n year survival probability
+ex_LC_SPAm.q95 <- life.exp(q_LC_SPAm.q95) # life expectancy
+
+p_LC_SPAm.q05 <- 1-q_LC_SPAm.q05# 1 year survival probability
+p0n_LC_SPAm.q05 <- apply(p_LC_SPAm.q05, 2, cumprod) # n year survival probability
+ex_LC_SPAm.q05 <- life.exp(q_LC_SPAm.q05) # life expectancy
+
+p_LC_SPAm.boot.q95 <- 1-q_LC_SPAm.boot.q95# 1 year survival probability
+p0n_LC_SPAm.boot.q95 <- apply(p_LC_SPAm.boot.q95, 2, cumprod) # n year survival probability
+ex_LC_SPAm.boot.q95 <- life.exp(q_LC_SPAm.boot.q95) # life expectancy
+
+p_LC_SPAm.boot.q05 <- 1-q_LC_SPAm.boot.q05# 1 year survival probability
+p0n_LC_SPAm.boot.q05 <- apply(p_LC_SPAm.boot.q05, 2, cumprod) # n year survival probability
+ex_LC_SPAm.boot.q05 <- life.exp(q_LC_SPAm.boot.q05) # life expectancy
+
+p_LC_SPAf.q95 <- 1-q_LC_SPAf.q95# 1 year survival probability
+p0n_LC_SPAf.q95 <- apply(p_LC_SPAf.q95, 2, cumprod) # n year survival probability
+ex_LC_SPAf.q95 <- life.exp(q_LC_SPAf.q95) # life expectancy
+
+p_LC_SPAf.q05 <- 1-q_LC_SPAf.q05# 1 year survival probability
+p0n_LC_SPAf.q05 <- apply(p_LC_SPAf.q05, 2, cumprod) # n year survival probability
+ex_LC_SPAf.q05 <- life.exp(q_LC_SPAf.q05) # life expectancy
+
+p_LC_SPAf.boot.q95 <- 1-q_LC_SPAf.boot.q95# 1 year survival probability
+p0n_LC_SPAf.boot.q95 <- apply(p_LC_SPAf.boot.q95, 2, cumprod) # n year survival probability
+ex_LC_SPAf.boot.q95 <- life.exp(q_LC_SPAf.boot.q95) # life expectancy
+
+p_LC_SPAf.boot.q05 <- 1-q_LC_SPAf.boot.q05# 1 year survival probability
+p0n_LC_SPAf.boot.q05 <- apply(p_LC_SPAf.boot.q05, 2, cumprod) # n year survival probability
+ex_LC_SPAf.boot.q05 <- life.exp(q_LC_SPAf.boot.q05) # life expectancy
+
+ex_LC.SPAm.q05<-as.data.frame(ex_LC_SPAm.q05)
+ex_LC.SPAm.q95<-as.data.frame(ex_LC_SPAm.q95)
+ex_LC.SPAm.boot.q05<-as.data.frame(ex_LC_SPAm.boot.q05)
+ex_LC.SPAm.boot.q95<-as.data.frame(ex_LC_SPAm.boot.q95)
+ex_LC.SPAf.q05<-as.data.frame(ex_LC_SPAf.q05)
+ex_LC.SPAf.q95<-as.data.frame(ex_LC_SPAf.q95)
+ex_LC.SPAf.boot.q05<-as.data.frame(ex_LC_SPAf.boot.q05)
+ex_LC.SPAf.boot.q95<-as.data.frame(ex_LC_SPAf.boot.q95)
+```
+
+### Valore attuale di rendite vitalizie
+
+```{r V.A. ann}
+p_LC_SPAm.st.ext <- 1-q_LC_SPAm.st.ext
+ann_LC_SPAm.st <- annuity.st(q_LC_SPAm.st.ext,v_vect,0.99)
+ann_LC_SPAm.mean <- ann_LC_SPAm.st[[1]]
+ann_LC_SPAm.q95 <- ann_LC_SPAm.st[[2]]
+ann_LC_SPAm.q05 <- ann_LC_SPAm.st[[3]]
+
+p_LC_SPAf.st.ext <- 1-q_LC_SPAf.st.ext
+ann_LC_SPAf.st <- annuity.st(q_LC_SPAf.st.ext,v_vect,0.9)
+ann_LC_SPAf.mean <- ann_LC_SPAf.st[[1]]
+ann_LC_SPAf.q95 <- ann_LC_SPAf.st[[2]]
+ann_LC_SPAf.q05 <- ann_LC_SPAf.st[[3]]
+
+ann_LC.SPAm.m <- as.data.frame(ann_LC_SPAm.mean)
+ann_LC.SPAm.q95 <- as.data.frame(ann_LC_SPAm.q95)
+ann_LC.SPAm.q05 <- as.data.frame(ann_LC_SPAm.q05)
+ann_LC.SPAf.m <- as.data.frame(ann_LC_SPAf.mean)
+ann_LC.SPAf.q95 <-as.data.frame(ann_LC_SPAf.q95)
+ann_LC.SPAf.q05<- as.data.frame(ann_LC_SPAf.q05)
+```
+
+## x PLAT
+
+### Calcolo probabilità di sopravvivenza e aspettativa di vita
+
+```{r Px ex plat}
+p_PLAT_SPAm.q95 <- 1-q_PLAT_SPAm.q95# 1 year survival probability
+p0n_PLAT_SPAm.q95 <- apply(p_PLAT_SPAm.q95, 2, cumprod) # n year survival probability
+ex_PLAT_SPAm.q95 <- life.exp(q_PLAT_SPAm.q95) # life expectancy
+
+p_PLAT_SPAm.q05 <- 1-q_PLAT_SPAm.q05# 1 year survival probability
+p0n_PLAT_SPAm.q05 <- apply(p_PLAT_SPAm.q05, 2, cumprod) # n year survival probability
+ex_PLAT_SPAm.q05 <- life.exp(q_PLAT_SPAm.q05) # life expectancy
+
+p_PLAT_SPAm.boot.q95 <- 1-q_PLAT_SPAm.boot.q95# 1 year survival probability
+p0n_PLAT_SPAm.boot.q95 <- apply(p_PLAT_SPAm.boot.q95, 2, cumprod) # n year survival probability
+ex_PLAT_SPAm.boot.q95 <- life.exp(q_PLAT_SPAm.boot.q95) # life expectancy
+
+p_PLAT_SPAm.boot.q05 <- 1-q_PLAT_SPAm.boot.q05# 1 year survival probability
+p0n_PLAT_SPAm.boot.q05 <- apply(p_PLAT_SPAm.boot.q05, 2, cumprod) # n year survival probability
+ex_PLAT_SPAm.boot.q05 <- life.exp(q_PLAT_SPAm.boot.q05) # life expectancy
+
+p_PLAT_SPAf.q95 <- 1-q_PLAT_SPAf.q95# 1 year survival probability
+p0n_PLAT_SPAf.q95 <- apply(p_PLAT_SPAf.q95, 2, cumprod) # n year survival probability
+ex_PLAT_SPAf.q95 <- life.exp(q_PLAT_SPAf.q95) # life expectancy
+
+p_PLAT_SPAf.q05 <- 1-q_PLAT_SPAf.q05# 1 year survival probability
+p0n_PLAT_SPAf.q05 <- apply(p_PLAT_SPAf.q05, 2, cumprod) # n year survival probability
+ex_PLAT_SPAf.q05 <- life.exp(q_PLAT_SPAf.q05) # life expectancy
+
+p_PLAT_SPAf.boot.q95 <- 1-q_PLAT_SPAf.boot.q95# 1 year survival probability
+p0n_PLAT_SPAf.boot.q95 <- apply(p_PLAT_SPAf.boot.q95, 2, cumprod) # n year survival probability
+ex_PLAT_SPAf.boot.q95 <- life.exp(q_PLAT_SPAf.boot.q95) # life expectancy
+
+p_PLAT_SPAf.boot.q05 <- 1-q_PLAT_SPAf.boot.q05# 1 year survival probability
+p0n_PLAT_SPAf.boot.q05 <- apply(p_PLAT_SPAf.boot.q05, 2, cumprod) # n year survival probability
+ex_PLAT_SPAf.boot.q05 <- life.exp(q_PLAT_SPAf.boot.q05) # life expectancy
+
+ex_PLAT.SPAm.q05<-as.data.frame(ex_PLAT_SPAm.q05)
+ex_PLAT.SPAm.q95<-as.data.frame(ex_PLAT_SPAm.q95)
+ex_PLAT.SPAm.boot.q05<-as.data.frame(ex_PLAT_SPAm.boot.q05)
+ex_PLAT.SPAm.boot.q95<-as.data.frame(ex_PLAT_SPAm.boot.q95)
+ex_PLAT.SPAf.q05<-as.data.frame(ex_PLAT_SPAf.q05)
+ex_PLAT.SPAf.q95<-as.data.frame(ex_PLAT_SPAf.q95)
+ex_PLAT.SPAf.boot.q05<-as.data.frame(ex_PLAT_SPAf.boot.q05)
+ex_PLAT.SPAf.boot.q95<-as.data.frame(ex_PLAT_SPAf.boot.q95)
+```
+
+### Valore attuale di rendite vitalizie
+
+```{r V.A. ann plat}
+p_PLAT_SPAm.st.ext <- 1-q_PLAT_SPAm.st.ext
+ann_PLAT_SPAm.st <- annuity.st(q_PLAT_SPAm.st.ext,v_vect,0.99)
+ann_PLAT_SPAm.mean <- ann_PLAT_SPAm.st[[1]]
+ann_PLAT_SPAm.q95 <- ann_PLAT_SPAm.st[[2]]
+ann_PLAT_SPAm.q05 <- ann_PLAT_SPAm.st[[3]]
+
+p_PLAT_SPAf.st.ext <- 1-q_PLAT_SPAf.st.ext
+ann_PLAT_SPAf.st <- annuity.st(q_PLAT_SPAf.st.ext,v_vect,0.9)
+ann_PLAT_SPAf.mean <- ann_PLAT_SPAf.st[[1]]
+ann_PLAT_SPAf.q95 <- ann_PLAT_SPAf.st[[2]]
+ann_PLAT_SPAf.q05 <- ann_PLAT_SPAf.st[[3]]
+
+ann_PLAT.SPAm.m <- as.data.frame(ann_PLAT_SPAm.mean)
+ann_PLAT.SPAm.q95 <- as.data.frame(ann_PLAT_SPAm.q95)
+ann_PLAT.SPAm.q05 <- as.data.frame(ann_PLAT_SPAm.q05)
+ann_PLAT.SPAf.m <- as.data.frame(ann_PLAT_SPAf.mean)
+ann_PLAT.SPAf.q95 <-as.data.frame(ann_PLAT_SPAf.q95)
+ann_PLAT.SPAf.q05<- as.data.frame(ann_PLAT_SPAf.q05)
+```
+
+## x APC
+
+### Calcolo probabilità di sopravvivenza e aspettativa di vita
+
+```{r Px ex apc}
+p_APC_SPAm.q95 <- 1-q_APC_SPAm.q95# 1 year survival probability
+p0n_APC_SPAm.q95 <- apply(p_APC_SPAm.q95, 2, cumprod) # n year survival probability
+ex_APC_SPAm.q95 <- life.exp(q_APC_SPAm.q95) # life expectancy
+
+p_APC_SPAm.q05 <- 1-q_APC_SPAm.q05# 1 year survival probability
+p0n_APC_SPAm.q05 <- apply(p_APC_SPAm.q05, 2, cumprod) # n year survival probability
+ex_APC_SPAm.q05 <- life.exp(q_APC_SPAm.q05) # life expectancy
+
+p_APC_SPAm.boot.q95 <- 1-q_APC_SPAm.boot.q95# 1 year survival probability
+p0n_APC_SPAm.boot.q95 <- apply(p_APC_SPAm.boot.q95, 2, cumprod) # n year survival probability
+ex_APC_SPAm.boot.q95 <- life.exp(q_APC_SPAm.boot.q95) # life expectancy
+
+p_APC_SPAm.boot.q05 <- 1-q_APC_SPAm.boot.q05# 1 year survival probability
+p0n_APC_SPAm.boot.q05 <- apply(p_APC_SPAm.boot.q05, 2, cumprod) # n year survival probability
+ex_APC_SPAm.boot.q05 <- life.exp(q_APC_SPAm.boot.q05) # life expectancy
+
+p_APC_SPAf.q95 <- 1-q_APC_SPAf.q95# 1 year survival probability
+p0n_APC_SPAf.q95 <- apply(p_APC_SPAf.q95, 2, cumprod) # n year survival probability
+ex_APC_SPAf.q95 <- life.exp(q_APC_SPAf.q95) # life expectancy
+
+p_APC_SPAf.q05 <- 1-q_APC_SPAf.q05# 1 year survival probability
+p0n_APC_SPAf.q05 <- apply(p_APC_SPAf.q05, 2, cumprod) # n year survival probability
+ex_APC_SPAf.q05 <- life.exp(q_APC_SPAf.q05) # life expectancy
+
+p_APC_SPAf.boot.q95 <- 1-q_APC_SPAf.boot.q95# 1 year survival probability
+p0n_APC_SPAf.boot.q95 <- apply(p_APC_SPAf.boot.q95, 2, cumprod) # n year survival probability
+ex_APC_SPAf.boot.q95 <- life.exp(q_APC_SPAf.boot.q95) # life expectancy
+
+p_APC_SPAf.boot.q05 <- 1-q_APC_SPAf.boot.q05# 1 year survival probability
+p0n_APC_SPAf.boot.q05 <- apply(p_APC_SPAf.boot.q05, 2, cumprod) # n year survival probability
+ex_APC_SPAf.boot.q05 <- life.exp(q_APC_SPAf.boot.q05) # life expectancy
+
+ex_APC.SPAm.q05<-as.data.frame(ex_APC_SPAm.q05)
+ex_APC.SPAm.q95<-as.data.frame(ex_APC_SPAm.q95)
+ex_APC.SPAm.boot.q05<-as.data.frame(ex_APC_SPAm.boot.q05)
+ex_APC.SPAm.boot.q95<-as.data.frame(ex_APC_SPAm.boot.q95)
+ex_APC.SPAf.q05<-as.data.frame(ex_APC_SPAf.q05)
+ex_APC.SPAf.q95<-as.data.frame(ex_APC_SPAf.q95)
+ex_APC.SPAf.boot.q05<-as.data.frame(ex_APC_SPAf.boot.q05)
+ex_APC.SPAf.boot.q95<-as.data.frame(ex_APC_SPAf.boot.q95)
+```
+
+### Valore attuale di rendite vitalizie
+
+```{r V.A. ann apc}
+p_APC_SPAm.st.ext <- 1-q_APC_SPAm.st.ext
+ann_APC_SPAm.st <- annuity.st(q_APC_SPAm.st.ext,v_vect,0.99)
+ann_APC_SPAm.mean <- ann_APC_SPAm.st[[1]]
+ann_APC_SPAm.q95 <- ann_APC_SPAm.st[[2]]
+ann_APC_SPAm.q05 <- ann_APC_SPAm.st[[3]]
+
+p_APC_SPAf.st.ext <- 1-q_APC_SPAf.st.ext
+ann_APC_SPAf.st <- annuity.st(q_APC_SPAf.st.ext,v_vect,0.9)
+ann_APC_SPAf.mean <- ann_APC_SPAf.st[[1]]
+ann_APC_SPAf.q95 <- ann_APC_SPAf.st[[2]]
+ann_APC_SPAf.q05 <- ann_APC_SPAf.st[[3]]
+
+ann_APC.SPAm.m <- as.data.frame(ann_APC_SPAm.mean)
+ann_APC.SPAm.q95 <- as.data.frame(ann_APC_SPAm.q95)
+ann_APC.SPAm.q05 <- as.data.frame(ann_APC_SPAm.q05)
+ann_APC.SPAf.m <- as.data.frame(ann_APC_SPAf.mean)
+ann_APC.SPAf.q95 <-as.data.frame(ann_APC_SPAf.q95)
+ann_APC.SPAf.q05<- as.data.frame(ann_APC_SPAf.q05)
+```
+
+Nei confronti che seguiranno, avremo sulle ordinate il valore della rendita, fissando l'età e facendo variare l'anno: 
+
+## Confronto grafico LC-PLAT-APC distribuzione rendite per 65enne maschio
+
+```{r plot_m ann. 65y}
+par(mfrow = c(1,3))
+plot(ann_LC_SPAm.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_LC_SPAm.q95["65",], type="l", lty=2)
+lines(ann_LC_SPAm.q05["65",], type="l", lty=2)
+
+plot(ann_PLAT_SPAm.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_PLAT_SPAm.q95["65",], type="l", lty=2)
+lines(ann_PLAT_SPAm.q05["65",], type="l", lty=2)
+
+plot(ann_APC_SPAm.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_APC_SPAm.q95["65",], type="l", lty=2)
+lines(ann_APC_SPAm.q05["65",], type="l", lty=2)
+```
+
+Questi grafici servono a visualizzare l’andamento della rendita annua attesa per un individuo di 65 anni, basandosi sulle stime delle probabilità di morte ottenute dai modelli Lee-Carter, Plat e APC e a fornire un’indicazione della variabilità della distribuzione delle rendite.
+
+Il modello Lee-Carter, mostra un aumento progressivo e costante del valore attuale delle rendite nel tempo. La curva nera centrale rappresenta la stima principale delle rendite, mentre le linee tratteggiate indicano i limiti di incertezza. Inoltre, LC prevede una crescita costante dell’aspettativa di vita, indipendente dall’età la quale si traduce in una curva concava, dove l’effetto del tempo sull’aspettativa di vita rimane invariato con l’aumentare dell’età.
+
+Il terzo grafico, relativo al modello APC, mostra un incremento molto più rapido delle rendite attese. La curva convessa indica che l’effetto del tempo sull’aspettativa di vita diminuisce con l’età, portando a guadagni in aspettativa di vita sempre più piccoli con il passare del tempo.
+
+Mentre, il modello PLAT, al centro, presenta anch’esso un incremento delle rendite nel tempo, ma con una variazione iniziale seguita da una ripresa e crescita, con maggiore variabilità e incertezza.
+
+Il modello Lee-Carter offre previsioni più stabili e precise per la rendita annua attesa di un individuo di 65 anni, con una crescita lineare e un intervallo di confidenza stretto. Gli altri due sono più incerti.
+
+## Confronto grafico LC-PLAT-APC distribuzione rendite per 65enne femmina
+
+```{r plot_m ann. 65yo}
+par(mfrow = c(1,3))
+plot(ann_LC_SPAf.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_LC_SPAf.q95["65",], type="l", lty=2)
+lines(ann_LC_SPAf.q05["65",], type="l", lty=2)
+
+plot(ann_PLAT_SPAf.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_PLAT_SPAf.q95["65",], type="l", lty=2)
+lines(ann_PLAT_SPAf.q05["65",], type="l", lty=2)
+
+plot(ann_APC_SPAf.mean["65",], type="l", lty=1) # evoluzione rispetto a t (stessa età x)
+lines(ann_APC_SPAf.q95["65",], type="l", lty=2)
+lines(ann_APC_SPAf.q05["65",], type="l", lty=2)
+```
+
+Le previsioni per la popolazione femminile, per i modelli PLAT e APC, tendono ad essere più incerte con intervalli di confidenza più ampi. Mentre, il LC, vede in questa popolazione addirittura un intervalli di confidenza più stretto quindi più affidabile. La differenza plateale è sulle ordinate, infatti, per le donne, le rendite hanno un costo maggiore ciò è giustificato dal fatto che le donne hanno un'aspettativa di vita maggiore degli uomini.
+
+Per confermare la disparità di genere e la differenza nei calcoli coi modelli, utilizziamo una tabella, sia per la popolazione maschile che femminile:
+
+```{r Tab Ann. 65y}
+par(mfrow = c(2,1))
+LC_05 <- round(c(ann_LC_SPAm.q05["65",10], ann_LC_SPAm.q05["65",20],
+ann_LC_SPAm.q05["65",30], ann_LC_SPAm.q05["65",40],
+ann_LC_SPAm.q05["65",50]), 2)
+LC_50 <- round(c(ann_LC_SPAm.mean["65",10], ann_LC_SPAm.mean["65",20],
+ann_LC_SPAm.mean["65",30], ann_LC_SPAm.mean["65",40],
+ann_LC_SPAm.mean["65",50]), 2)
+LC_95 <- round(c(ann_LC_SPAm.q95["65",10], ann_LC_SPAm.q95["65",20],
+ann_LC_SPAm.q95["65",30], ann_LC_SPAm.q95["65",40],
+ann_LC_SPAm.q95["65",50]), 2)
+APC_05 <- round(c(ann_APC_SPAm.q05["65",10], ann_APC_SPAm.q05["65",20],
+ann_APC_SPAm.q05["65",30], ann_APC_SPAm.q05["65",40],
+ann_APC_SPAm.q05["65",50]), 2)
+APC_50 <- round(c(ann_APC_SPAm.mean["65",10], ann_APC_SPAm.mean["65",20],
+ann_APC_SPAm.mean["65",30], ann_APC_SPAm.mean["65",40],
+ann_APC_SPAm.mean["65",50]), 2)
+APC_95 <- round(c(ann_APC_SPAm.q95["65",10], ann_APC_SPAm.q95["65",20],
+ann_APC_SPAm.q95["65",30], ann_APC_SPAm.q95["65",40],
+ann_APC_SPAm.q95["65",50]), 2)
+PLAT_05 <- round(c(ann_PLAT_SPAm.q05["65",10], ann_PLAT_SPAm.q05["65",20],
+ann_PLAT_SPAm.q05["65",30], ann_PLAT_SPAm.q05["65",40],
+ann_PLAT_SPAm.q05["65",50]), 2)
+PLAT_50 <- round(c(ann_PLAT_SPAm.mean["65",10], ann_PLAT_SPAm.mean["65",20],
+ann_PLAT_SPAm.mean["65",30], ann_PLAT_SPAm.mean["65",40],
+ann_PLAT_SPAm.mean["65",50]), 2)
+PLAT_95 <- round(c(ann_PLAT_SPAm.q95["65",10], ann_PLAT_SPAm.q95["65",20],
+ann_PLAT_SPAm.q95["65",30], ann_PLAT_SPAm.q95["65",40],
+ann_PLAT_SPAm.q95["65",50]), 2)
+period <- c(10, 20 ,30, 40 ,50)
+annuity <- data.frame(LC_05, LC_50,LC_95 ,PLAT_05 ,PLAT_50 ,PLAT_95,
+APC_05 ,APC_50, APC_95, period)
+kable(annuity, "pipe", align = "r", caption = "Annuity for a 65 years old male")
+
+LC_05 <- round(c(ann_LC_SPAf.q05["65",10], ann_LC_SPAf.q05["65",20],
+ann_LC_SPAf.q05["65",30], ann_LC_SPAf.q05["65",40],
+ann_LC_SPAf.q05["65",50]), 2)
+LC_50 <- round(c(ann_LC_SPAf.mean["65",10], ann_LC_SPAf.mean["65",20],
+ann_LC_SPAf.mean["65",30], ann_LC_SPAf.mean["65",40],
+ann_LC_SPAf.mean["65",50]), 2)
+LC_95 <- round(c(ann_LC_SPAf.q95["65",10], ann_LC_SPAf.q95["65",20],
+ann_LC_SPAf.q95["65",30], ann_LC_SPAf.q95["65",40],
+ann_LC_SPAf.q95["65",50]), 2)
+APC_05 <- round(c(ann_APC_SPAf.q05["65",10], ann_APC_SPAf.q05["65",20],
+ann_APC_SPAf.q05["65",30], ann_APC_SPAf.q05["65",40],
+ann_APC_SPAf.q05["65",50]), 2)
+APC_50 <- round(c(ann_APC_SPAf.mean["65",10], ann_APC_SPAf.mean["65",20],
+ann_APC_SPAf.mean["65",30], ann_APC_SPAf.mean["65",40],
+ann_APC_SPAf.mean["65",50]), 2)
+APC_95 <- round(c(ann_APC_SPAf.q95["65",10], ann_APC_SPAf.q95["65",20],
+ann_APC_SPAf.q95["65",30], ann_APC_SPAf.q95["65",40],
+ann_APC_SPAf.q95["65",50]), 2)
+PLAT_05 <- round(c(ann_PLAT_SPAf.q05["65",10], ann_PLAT_SPAf.q05["65",20],
+ann_PLAT_SPAf.q05["65",30], ann_PLAT_SPAf.q05["65",40],
+ann_PLAT_SPAf.q05["65",50]), 2)
+PLAT_50 <- round(c(ann_PLAT_SPAf.mean["65",10], ann_PLAT_SPAf.mean["65",20],
+ann_PLAT_SPAf.mean["65",30], ann_PLAT_SPAf.mean["65",40],
+ann_PLAT_SPAf.mean["65",50]), 2)
+PLAT_95 <- round(c(ann_PLAT_SPAf.q95["65",10], ann_PLAT_SPAf.q95["65",20],
+ann_PLAT_SPAf.q95["65",30], ann_PLAT_SPAf.q95["65",40],
+ann_PLAT_SPAf.q95["65",50]), 2)
+period <- c(10, 20 ,30, 40 ,50)
+annuity <- data.frame(LC_05, LC_50,LC_95 ,PLAT_05 ,PLAT_50 ,PLAT_95,
+APC_05 ,APC_50, APC_95, period)
+kable(annuity, "pipe", align = "r", caption = "Annuity for a 65 years old female")
+```
+
+```{r Tab Ann. 65y_m}
+# Caricare i pacchetti necessari
+library(ggplot2)
+library(tidyr)
+
+# Creare il data frame
+data_m <- data.frame(
+  LC_05 = c(15.24, 15.64, 16.25, 16.80, 17.11),
+  LC_50 = c(16.04, 16.71, 17.36, 17.96, 18.51),
+  LC_95 = c(16.86, 17.66, 18.56, 19.18, 19.75),
+  PLAT_05 = c(12.24, 11.39, 11.67, 12.74, 13.40),
+  PLAT_50 = c(14.38, 14.34, 14.99, 16.14, 17.26),
+  PLAT_95 = c(16.51, 17.35, 18.28, 19.88, 21.41),
+  APC_05 = c(13.27, 14.08, 15.71, 17.26, 18.98),
+  APC_50 = c(15.47, 16.67, 18.40, 20.45, 22.57),
+  APC_95 = c(17.42, 19.58, 21.11, 22.95, 25.11),
+  period = c(10, 20, 30, 40, 50)
+)
+
+# Riorganizzare il data frame per ggplot
+df_long <- data_m %>%
+  pivot_longer(cols = -period, names_to = c("model", "percentile"), names_sep = "_") %>%
+  pivot_wider(names_from = percentile, values_from = value)
+
+# Creare il grafico
+ggplot(df_long, aes(x = period, y = `50`, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = `05`, ymax = `95`, fill = model), alpha = 0.2) +
+  labs(title = "Rendite Annuue Attese per un Individuo di 65 Anni maschio",
+       x = "Periodo", y = "Rendita Annuua Attesa",
+       color = "Modello", fill = "Modello") +
+  theme_minimal()
+```
+
+### Analisi del Grafico delle Rendite Annue Attese
+
+Il grafico mostra l'andamento delle rendite annue attese per un individuo di 65 anni stimate utilizzando tre diversi modelli: Lee-Carter, Plat e Age-Period-Cohort. Le linee rappresentano la traiettoria delle rendite annue medie (percentile 50°) nel tempo, mentre le bande colorate rappresentano gli intervalli di confidenza tra il 5° e il 95° percentile per ciascun modello.
+
+Il modello Lee-Carter (LC) mostra una crescita costante e graduale nel tempo delle rendite annue attese. L'intervallo di confidenza per il LC è relativamente stretto, indicato dalla banda verde, suggerendo previsioni più precise e meno incerte rispetto agli altri modelli.
+
+Il modello Plat (PLAT) presenta una crescita delle rendite annue attese che inizia più bassa rispetto agli altri modelli, con una crescita più lenta nei primi periodi e un recupero successivo. La banda blu rappresenta l'intervallo di confidenza del PLAT, che è più ampio rispetto al modello LC, indicando una maggiore incertezza nelle stime, con una maggiore variabilità soprattutto nei periodi iniziali.
+
+Il modello Age-Period-Cohort (APC) prevede rendite annue significativamente più alte nel lungo periodo rispetto agli altri due modelli. La crescita delle rendite annue è più ripida e pronunciata. Tuttavia, la banda rossa, che rappresenta l'intervallo di confidenza, è la più ampia tra i tre modelli, indicando una significativa incertezza nelle previsioni, nonostante le previsioni medie suggeriscano rendite più elevate nel futuro.
+
+-   **LC vs PLAT**: Il modello LC mostra una crescita più stabile e meno incerta rispetto al modello PLAT. Le rendite stimate dal PLAT sono inizialmente più basse ma recuperano nel lungo periodo. L'intervallo di confidenza più ampio del PLAT suggerisce che le sue previsioni sono meno affidabili rispetto al LC.
+
+-   **LC vs APC**: Il modello APC prevede rendite significativamente più alte rispetto al LC, ma con una maggiore incertezza. Se si desidera una previsione più conservativa e stabile, il modello LC è preferibile. Tuttavia, se si è disposti ad accettare una maggiore incertezza in cambio di potenziali rendite più elevate, il modello APC può essere considerato.
+
+-   **PLAT vs APC**: Entrambi i modelli mostrano maggiore incertezza rispetto al LC, ma il modello APC prevede rendite più alte nel lungo termine. Il modello PLAT, nonostante le sue stime iniziali più basse, mostra un recupero e una crescita costante, ma non raggiunge i livelli previsti dal modello APC.
+
+Il grafico evidenzia come i diversi modelli possano portare a previsioni molto diverse delle rendite annue attese per un individuo di 65 anni. Il modello Lee-Carter offre previsioni più stabili e meno incerte, mentre il modello APC prevede rendite significativamente più alte ma con una maggiore incertezza. Il modello PLAT mostra una maggiore variabilità iniziale, con una ripresa successiva.
+
+La scelta del modello dipende dalla tolleranza all'incertezza e dagli obiettivi specifici di chi utilizza queste previsioni. Se si preferisce una previsione conservativa, il modello Lee-Carter è la scelta migliore. Se si è disposti ad accettare una maggiore incertezza per la possibilità di rendite più elevate, il modello APC può essere considerato.
+
+```{r Tab Ann. 65y_f}
+# Caricare i pacchetti necessari
+library(ggplot2)
+library(tidyr)
+
+# Creare il data frame
+data_f <- data.frame(
+  LC_05 = c(18.08, 18.62, 19.09, 19.59, 20.08),
+  LC_50 = c(18.58, 19.24, 19.84, 20.35, 20.83),
+  LC_95 = c(19.05, 19.83, 20.51, 20.99, 21.49),
+  PLAT_05 = c(16.21, 15.49, 15.79, 16.35, 16.89),
+  PLAT_50 = c(17.51, 17.38, 17.71, 18.51, 19.34),
+  PLAT_95 = c(18.89, 19.34, 19.78, 20.76, 21.65),
+  APC_05 = c(17.08, 17.79, 18.95, 20.65, 22.39),
+  APC_50 = c(18.43, 19.45, 20.79, 22.46, 24.23),
+  APC_95 = c(19.60, 21.17, 22.58, 24.20, 25.94),
+  period = c(10, 20, 30, 40, 50)
+)
+
+# Riorganizzare il data frame per ggplot
+df_long <- data_f %>%
+  pivot_longer(cols = -period, names_to = c("model", "percentile"), names_sep = "_") %>%
+  pivot_wider(names_from = percentile, values_from = value)
+
+# Creare il grafico
+ggplot(df_long, aes(x = period, y = `50`, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = `05`, ymax = `95`, fill = model), alpha = 0.2) +
+  labs(title = "Rendite Annuue Attese per un Individuo di 65 Anni femmina",
+       x = "Periodo", y = "Rendita Annuua Attesa",
+       color = "Modello", fill = "Modello") +
+  theme_minimal()
+```
+
+Il grafico per le femmine segue una struttura simile a quello per i maschi, con rendite stimate dai modelli LC, Plat e APC.
+
+Modello APC: Anche per le femmine, il modello APC prevede rendite più alte rispetto agli altri modelli. Tuttavia, l'incremento delle rendite nel tempo è meno pronunciato rispetto ai maschi. L'intervallo di confidenza è ampio, ma leggermente più stretto rispetto a quello dei maschi. Modello LC: Le rendite stimate da questo modello sono più vicine a quelle del modello APC rispetto ai maschi. La tendenza è crescente e l'intervallo di confidenza è relativamente stretto. Modello Plat: Anche in questo caso, il modello Plat prevede le rendite più basse. La tendenza è leggermente crescente, ma con un intervallo di confidenza più ampio rispetto agli altri due modelli.
+
+## Confronto grafico LC-PLAT-APC distribuzione rendite 2050 maschio
+
+In questo caso, sarà fissato l'anno e a variare sarà l'età:
+
+```{r plot_m ann. 2050}
+par(mfrow = c(1,3))
+plot(ann_LC_SPAm.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_LC_SPAm.q95[,"2050"], type="l", lty=2)
+lines(ann_LC_SPAm.q05[,"2050"], type="l", lty=2)
+
+plot(ann_PLAT_SPAm.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_PLAT_SPAm.q95[,"2050"], type="l", lty=2)
+lines(ann_PLAT_SPAm.q05[,"2050"], type="l", lty=2)
+
+plot(ann_APC_SPAm.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_APC_SPAm.q95[,"2050"], type="l", lty=2)
+lines(ann_APC_SPAm.q05[,"2050"], type="l", lty=2)
+```
+
+Per gli uomini, le rendite annue attese secondo il modello LC mostrano una decrescita costante nel tempo, con una stretta banda di confidenza che indica una bassa incertezza nelle stime. Il modello PLAT per gli uomini evidenzia una traiettoria simile, con una decrescita nel tempo, ma la banda di confidenza è più ampia, indicando una maggiore incertezza. Il modello APC mostra una decrescita più ripida, con una banda di confidenza più ampia rispetto al modello LC, ma meno ampia rispetto al modello PLAT.
+
+## Confronto grafico LC-PLAT-APC distribuzione rendite 2050 femmina
+```{r plot_f ann. 2050}
+par(mfrow = c(1,3))
+plot(ann_LC_SPAf.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_LC_SPAf.q95[,"2050"], type="l", lty=2)
+lines(ann_LC_SPAf.q05[,"2050"], type="l", lty=2)
+
+plot(ann_PLAT_SPAf.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_PLAT_SPAf.q95[,"2050"], type="l", lty=2)
+lines(ann_PLAT_SPAf.q05[,"2050"], type="l", lty=2)
+
+plot(ann_APC_SPAf.mean[,"2050"], type="l", lty=1) # evoluzione rispetto a x (stesso anno t)
+lines(ann_APC_SPAf.q95[,"2050"], type="l", lty=2)
+lines(ann_APC_SPAf.q05[,"2050"], type="l", lty=2)
+```
+
+Per le donne, le rendite annue attese seguono un andamento simile a quello degli uomini. Il modello LC mostra una decrescita costante e una bassa incertezza, come evidenziato dalla stretta banda di confidenza. Il modello PLAT presenta una decrescita più pronunciata nel tempo rispetto al modello LC, con una banda di confidenza più ampia, suggerendo maggiore incertezza nelle stime. Il modello APC per le donne indica una decrescita significativa, con un intervallo di confidenza ampio, simile a quello degli uomini.
+
+Confrontando i due generi, si osserva che le traiettorie delle rendite annue attese per gli uomini e le donne seguono schemi simili per ciascun modello. Tuttavia, le rendite per le donne tendono a partire da un valore leggermente superiore rispetto agli uomini in tutti i modelli. Le bande di confidenza per i modelli PLAT e APC sono più ampie per le donne, indicando una maggiore incertezza rispetto agli uomini. In entrambi i generi, il modello LC offre le previsioni più stabili con la minore incertezza, mentre il modello PLAT mostra la maggiore incertezza nelle stime.
+
+In sintesi, le rendite annue attese stimate dai modelli LC, PLAT e APC decrescono nel tempo per entrambi i generi. Le stime del modello LC sono le più stabili e precise, mentre quelle del modello PLAT sono le più incerte. Le differenze tra i generi sono minime, con le donne che generalmente hanno rendite iniziali leggermente più alte e una maggiore incertezza nelle stime rispetto agli uomini.
+
+```{r Tab Ann. 2050}
+LC_05 <- round(c(ann_LC_SPAm.q05["0","2050"], ann_LC_SPAm.q05["20","2050"],
+ ann_LC_SPAm.q05["40","2050"], ann_LC_SPAm.q05["60","2050"],
+ ann_LC_SPAm.q05["80","2050"]), 2)
+LC_50 <- round(c(ann_LC_SPAm.mean["0","2050"], ann_LC_SPAm.mean["20","2050"],
+ ann_LC_SPAm.mean["40","2050"], ann_LC_SPAm.mean["60","2050"],
+ ann_LC_SPAm.mean["80","2050"]), 2)
+LC_95 <- round(c(ann_LC_SPAm.q95["0","2050"], ann_LC_SPAm.q95["20","2050"],
+ ann_LC_SPAm.q95["40","2050"], ann_LC_SPAm.q95["60","2050"],
+ ann_LC_SPAm.q95["80","2050"]), 2)
+PLAT_05 <- round(c(ann_PLAT_SPAm.q05["0","2050"], ann_PLAT_SPAm.q05["20","2050"],
+ ann_PLAT_SPAm.q05["40","2050"], ann_PLAT_SPAm.q05["60","2050"],
+ ann_PLAT_SPAm.q05["80","2050"]), 2)
+PLAT_50 <- round(c(ann_PLAT_SPAm.mean["0","2050"],
+ann_PLAT_SPAm.mean["20","2050"],
+ ann_PLAT_SPAm.mean["40","2050"],
+ann_PLAT_SPAm.mean["60","2050"],
+ ann_PLAT_SPAm.mean["80","2050"]), 2)
+PLAT_95 <- round(c(ann_PLAT_SPAm.q95["0","2050"], ann_PLAT_SPAm.q95["20","2050"],
+ ann_PLAT_SPAm.q95["40","2050"], ann_PLAT_SPAm.q95["60","2050"],
+ ann_PLAT_SPAm.q95["80","2050"]), 2)
+APC_05 <- round(c(ann_APC_SPAm.q05["0","2050"], ann_APC_SPAm.q05["20","2050"],
+ ann_APC_SPAm.q05["40","2050"], ann_APC_SPAm.q05["60","2050"],
+ ann_APC_SPAm.q05["80","2050"]), 2)
+APC_50 <- round(c(ann_APC_SPAm.mean["0","2050"], ann_APC_SPAm.mean["20","2050"],
+ ann_APC_SPAm.mean["40","2050"], ann_APC_SPAm.mean["60","2050"],
+ ann_APC_SPAm.mean["80","2050"]), 2)
+APC_95 <- round(c(ann_APC_SPAm.q95["0","2050"], ann_APC_SPAm.q95["20","2050"],
+ ann_APC_SPAm.q95["40","2050"], ann_APC_SPAm.q95["60","2050"],
+ ann_APC_SPAm.q95["80","2050"]), 2)
+ages <- c(0, 20, 40, 60, 80)
+annuity <- data.frame(LC_05, LC_50, LC_95, PLAT_05, PLAT_50, PLAT_95,
+ APC_05, APC_50, APC_95, ages)
+kable(annuity, format = 'pipe', align = 'r',
+ caption = "Annuity for any age until 2050 (male)")
+
+LC_05 <- round(c(ann_LC_SPAf.q05["0","2050"], ann_LC_SPAf.q05["20","2050"],
+ ann_LC_SPAf.q05["40","2050"], ann_LC_SPAf.q05["60","2050"],
+ ann_LC_SPAf.q05["80","2050"]), 2)
+LC_50 <- round(c(ann_LC_SPAf.mean["0","2050"], ann_LC_SPAf.mean["20","2050"],
+ ann_LC_SPAf.mean["40","2050"], ann_LC_SPAf.mean["60","2050"],
+ ann_LC_SPAf.mean["80","2050"]), 2)
+LC_95 <- round(c(ann_LC_SPAf.q95["0","2050"], ann_LC_SPAf.q95["20","2050"],
+ ann_LC_SPAf.q95["40","2050"], ann_LC_SPAf.q95["60","2050"],
+ ann_LC_SPAf.q95["80","2050"]), 2)
+PLAT_05 <- round(c(ann_PLAT_SPAf.q05["0","2050"], ann_PLAT_SPAf.q05["20","2050"],
+ ann_PLAT_SPAf.q05["40","2050"], ann_PLAT_SPAf.q05["60","2050"],
+ ann_PLAT_SPAf.q05["80","2050"]), 2)
+PLAT_50 <- round(c(ann_PLAT_SPAf.mean["0","2050"],
+ann_PLAT_SPAf.mean["20","2050"],
+ ann_PLAT_SPAf.mean["40","2050"],
+ann_PLAT_SPAf.mean["60","2050"],
+ ann_PLAT_SPAf.mean["80","2050"]), 2)
+PLAT_95 <- round(c(ann_PLAT_SPAf.q95["0","2050"], ann_PLAT_SPAf.q95["20","2050"],
+ ann_PLAT_SPAf.q95["40","2050"], ann_PLAT_SPAf.q95["60","2050"],
+ ann_PLAT_SPAf.q95["80","2050"]), 2)
+APC_05 <- round(c(ann_APC_SPAf.q05["0","2050"], ann_APC_SPAf.q05["20","2050"],
+ ann_APC_SPAf.q05["40","2050"], ann_APC_SPAf.q05["60","2050"],
+ ann_APC_SPAf.q05["80","2050"]), 2)
+APC_50 <- round(c(ann_APC_SPAf.mean["0","2050"], ann_APC_SPAf.mean["20","2050"],
+ ann_APC_SPAf.mean["40","2050"], ann_APC_SPAf.mean["60","2050"],
+ ann_APC_SPAf.mean["80","2050"]), 2)
+APC_95 <- round(c(ann_APC_SPAf.q95["0","2050"], ann_APC_SPAf.q95["20","2050"],
+ ann_APC_SPAf.q95["40","2050"], ann_APC_SPAf.q95["60","2050"],
+ ann_APC_SPAf.q95["80","2050"]), 2)
+ages <- c(0, 20, 40, 60, 80)
+annuity <- data.frame(LC_05, LC_50, LC_95, PLAT_05, PLAT_50, PLAT_95,
+ APC_05, APC_50, APC_95, ages)
+kable(annuity, format = 'pipe', align = 'r',
+ caption = "Annuity for any age until 2050 (female)")
+```
+
+```{r graph_m Ann. 2050}
+# Caricare i pacchetti necessari
+library(ggplot2)
+library(tidyr)
+
+# Creare il data frame
+data_m2050 <- data.frame(
+  LC_05 = c(39.89, 35.06, 28.14, 18.89, 8.25),
+  LC_50 = c(40.39, 35.76, 29.08, 20.01, 9.01),
+  LC_95 = c(40.88, 36.47, 30.05, 21.18, 9.84),
+  PLAT_05 = c(39.02, 33.77, 26.01, 14.92, 4.02),
+  PLAT_50 = c(40.05, 35.28, 28.23, 18.07, 6.57),
+  PLAT_95 = c(41.10, 36.83, 30.50, 21.30, 9.89),
+  APC_05 = c(40.13, 35.58, 28.68, 18.82, 7.32),
+  APC_50 = c(41.07, 36.85, 30.53, 21.36, 9.84),
+  APC_95 = c(41.88, 38.04, 32.26, 23.80, 12.56),
+  ages = c(0, 20, 40, 60, 80)
+)
+
+# Riorganizzare il data frame per ggplot
+df_long_2050 <- data_m2050 %>%
+  pivot_longer(cols = -ages, names_to = c("model", "percentile"), names_sep = "_") %>%
+  pivot_wider(names_from = percentile, values_from = value)
+
+# Creare il grafico
+ggplot(df_long_2050, aes(x = ages, y = `50`, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = `05`, ymax = `95`, fill = model), alpha = 0.2) +
+  labs(title = "Rendite Annuue Attese per 65enni maschi",
+       x = "Età", y = "Rendita Annuua Attesa",
+       color = "Modello", fill = "Modello") +
+  theme_minimal()
+```
+
+```{r graph_f Ann. 2050}
+# Caricare i pacchetti necessari
+library(ggplot2)
+library(tidyr)
+
+# Creare il data frame con i dati femminili
+data_f2050 <- data.frame(
+  LC_05 = c(41.17, 36.93, 30.67, 21.84, 10.04),
+  LC_50 = c(41.46, 37.34, 31.24, 22.57, 10.68),
+  LC_95 = c(41.71, 37.69, 31.75, 23.22, 11.28),
+  PLAT_05 = c(40.35, 35.70, 28.82, 18.85, 6.66),
+  PLAT_50 = c(40.92, 36.56, 30.07, 20.65, 8.68),
+  PLAT_95 = c(41.56, 37.51, 31.49, 22.67, 11.07),
+  APC_05 = c(41.24, 37.15, 30.95, 21.91, 10.03),
+  APC_50 = c(41.83, 37.95, 32.13, 23.60, 12.04),
+  APC_95 = c(42.38, 38.75, 33.30, 25.28, 14.12),
+  ages = c(0, 20, 40, 60, 80)
+)
+
+# Riorganizzare il data frame per ggplot
+df_long_2050_f <- data_f2050 %>%
+  pivot_longer(cols = -ages, names_to = c("model", "percentile"), names_sep = "_") %>%
+  pivot_wider(names_from = percentile, values_from = value)
+
+# Creare il grafico
+ggplot(df_long_2050_f, aes(x = ages, y = `50`, color = model)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = `05`, ymax = `95`, fill = model), alpha = 0.2) +
+  labs(title = "Rendite Annuue Attese per 65enni femmine",
+       x = "Età", y = "Rendita Annuua Attesa",
+       color = "Modello", fill = "Modello") +
+  theme_minimal()
+
+```
+
+Per entrambi i sessi, il modello APC tende a prevedere rendite più alte rispetto agli altri modelli, mentre il modello PLAT tende a prevedere rendite più basse.
+
+La differenza tra i modelli è più pronunciata nelle età avanzate, con il modello PLAT che mostra le rendite più basse e il modello APC che mostra le rendite più alte.
+
+La maggiore incertezza nelle stime del modello PLAT è evidente in entrambi i sessi, come indicato dagli intervalli di confidenza più ampi.
+
+Le rendite previste per i maschi tendono ad essere leggermente più alte rispetto a quelle delle femmine nei modelli APC e LC, mentre il modello PLAT mostra una differenza meno marcata tra i sessi.
+
+Questi grafici forniscono una panoramica completa delle rendite annue attese secondo tre modelli diversi, evidenziando le differenze nelle stime tra maschi e femmine e l'incertezza associata a ciascun modello.
+
+\newpage
+
+Grazie per la cortese attenzione 
+
+Claudio Raffaele Salerno 
+

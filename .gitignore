@@ -1,0 +1,10 @@
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Renviron
+.env
+.DS_Store
+Thumbs.db
+*_cache/
+*_files/
